@@ -1,0 +1,10 @@
+#Google Cloud Functions reads this file automatically during build (deploy) action
+
+functions-framework==3.*
+pandas>=2.0.0
+openpyxl>=3.0.1
+google-api-python-client>=2.100.0
+google-auth>=2.20.0
+gspread>=6.0.0
+gspread-dataframe>=4.0.0
+google-auth-oauthlib>=1.2.0
