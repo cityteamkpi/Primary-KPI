@@ -123,7 +123,7 @@ def run_renew_processing(
 
         df["Capacity"] = df[COL_PROGRAM].map(constants.OCCUPANCY_CAPACITY)
         df["Goal"] = df[COL_PROGRAM].map(constants.OCCUPANCY_GOAL)
-        df["Prior Period Actuals"] = df[COL_PROGRAM].map(constants.OCCUPANCY_PRIOR_FY)
+        df["Prior FY Occupancy"] = df[COL_PROGRAM].map(constants.OCCUPANCY_PRIOR_FY)
         return df.reset_index(drop=True)
 
     def process_retention(df_base):
@@ -136,6 +136,9 @@ def run_renew_processing(
         cutoff = pd.Timestamp(constants.RETENTION_START_CUTOFF)
         gap = (df[COL_EXIT_DATE] - df[COL_START_DATE]).dt.days
         df["City"] = df[COL_PROGRAM].apply(constants.assign_city)
+        df["Year"] = df[COL_START_DATE].apply(constants.get_fiscal_year)
+        df["Quarter"] = df[COL_START_DATE].apply(constants.get_fiscal_quarter)
+        df["Year Q"] = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
 
         df["Entered Since Prior FY"] = ((df[COL_START_DATE] >= cutoff) & (df[COL_EXIT_DATE].isna() | (gap > 30))).astype(int)
         df["Exit After 30 Days"] = ((df[COL_START_DATE] >= cutoff) & df[COL_EXIT_DATE].notna() & (gap > 30) & (~df[COL_EXIT_REASON].isin(GRAD_REASONS))).astype(int)
