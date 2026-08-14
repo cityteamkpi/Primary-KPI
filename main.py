@@ -66,6 +66,15 @@ def run_my_script(request):
             from alum_processor import run_alum_processing
             print("Running Alumni Processor...")
             msg = run_alum_processing(
+                input_folder_name=input_folder,
+                output_folder_name=output_folder
+            )
+            results.append(msg)
+
+        if task in ["alum-gd", "all"]:
+            from alum_processor import run_alum_processing
+            print("Running Alumni Processor...")
+            msg = run_alum_processing(
                 start_date=start_date,
                 end_date=end_date,
                 input_folder_name=input_folder,
@@ -150,13 +159,21 @@ if __name__ == "__main__":
 
         if args.task in ["alum"]:
             from alum_processor import run_alum_processing
-            print(f"Running Alumni Processor for {cli_start} to {cli_end}...")
+            print(f"Running Alumni Processor ...")
             run_alum_processing(
-                start_date=cli_start,
-                end_date=cli_end,
                 input_folder_name=input_folder,
                 output_folder_name=output_folder
             )
+
+     #   if args.task in ["alum-gd"]:
+     #       from alum_processor import run_alum_processing
+     #       print(f"Running Alumni Processor for {cli_start} to {cli_end}...")
+     #       run_alum_processing(
+     #           start_date=cli_start,
+     #           end_date=cli_end,
+     #           input_folder_name=input_folder,
+     #           output_folder_name=output_folder
+     #       )
 
         if args.task in ["util", "all"]:
             from program_utilization_processor import run_utilization_processing
