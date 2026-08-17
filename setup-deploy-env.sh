@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 1. Define Paths and Constants
-export SA_KEY_PATH="/home/kpi/ct-kpi-automation/ct-kpi-automation-d56fab25ab61.json"
+export SA_KEY_PATH="/home/gdejager/Primary-KPI/ct-kpi-automation-d56fab25ab61.json"
 export PROJECT_ID="ct-kpi-automation"
 export REGION="us-central1"
 

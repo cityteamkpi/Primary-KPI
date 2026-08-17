@@ -32,35 +32,6 @@ VALID_PROGRAMS_NUM_DEN = {"San Jose Men Renew", "GV Renew"}
 VALID_PROGRAMS_IMPACT = VALID_PROGRAMS_ALL
 VALID_INTERN_PROGRAMS_IMPACT = VALID_PROGRAMS_ALL - {"Program Graduate Intern"}
 
-BARRIER_REMAP = {
-    "Criminal History or CASU": "Justice System Involved",
-    "Suspended driver's licence": "Suspended or No Driver's License",
-    "Suspended driver's license": "Suspended or No Driver's License",
-    "No driver's license": "Suspended or No Driver's License",
-    "No DL": "Suspended or No Driver's License",
-}
-
-IC_DATE_COLS = [
-    "Electrical Trainee Card Date_5727", "NCCER Date_5728", "Blueprint Reading Date_6785",
-    "Forklift Operator Date_5106", "OSHA10 Date_5118", "MA Date_5115",
-    "Google IT Support Certificate Date_5107", "HAZWOPER Date_5109", "HAZMAT Date_5108",
-    "CPR/FA/AED Date_5105", "CADC Date_5789", "ServSafe Food Manager Date_5126",
-    "ServSafe Food Handler Date_5125", "Material Handling Date_5116",
-    "Multi-Core Craft Curriculum Completion Date_5117", "RADT Date_5121", "HVAC Date_5113",
-    "CDL Date_6104", "CompTIA and/or A+ Date_5104", "OTHER Date_5119", "Guard Card Date_6561",
-    "TWIC Date_6631", "Google Automate Cybersecurity w/Python Date_6273", "CNC Machining Date_5103",
-    "Confined Space Date_6788", "DVAT Date_6791", "Fundamentals of Construction Date_6790",
-    "HR Associate Date_6789", "Intuit Bookkeeping Date_6105", "Massage Therapy Cert Date_7032",
-    "Peer Support Date_7031", "Record Expungement Date_6787",
-    "Record Expungement Attorney Consultation Date_6879", "Traffic Control Date_6786"
-]
-
-EXTRA_WINDOW_COLS = [
-    "High School Equivalency (HSE) Date_5110", "Bank Account Obtained Date_6640",
-    "Driver's License Date_5071", "Birth Certificate Obtained Date_6638",
-    "State ID Obtained Date_6637", "Social Security Card Obtained Date_6639",
-    "Date Job Acquired_5590"
-]
 
 # Generate Forward Map variations programmatically to avoid key repetition
 _FORWARD_BASE = {
@@ -109,7 +80,7 @@ LW_CRITERIA, TP_CAPACITY, TP_GOAL, TP_PRIOR_FY = {}, {}, {}, {}
 
 def sync_constants():
     drive_service, _, creds = get_services()
-    folder_path = "CityTeam Impact Data/CityTeam KPIs/FY26/FY26 Q3"
+    folder_path = "CityTeam Impact Data/CityTeam KPIs"
     sheet_name = "Constants Update"
 
     folder_id = resolve_folder_id(drive_service, folder_path.split("/")[-1], "Constants")

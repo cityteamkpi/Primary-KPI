@@ -127,6 +127,7 @@ def run_atwork_processing(
     a_fh, _, _ = download_drive_file(drive_service, atwork_input_file, input_folder_id)
     df_raw_atwork = load_raw(a_fh, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
 
+
     # =========================================================================
     # 3. Data Processing Internal Functions
     # =========================================================================
@@ -144,7 +145,7 @@ def run_atwork_processing(
     def process_barriers_cleaned(df_raw):
         df = df_raw.copy()
         df[COL_DATE] = pd.to_datetime(df[COL_DATE], errors="coerce")
-        df = df[df[COL_DATE].notna() & (df[COL_DATE] >= constants.CURRENT_Q_START) & (df[COL_DATE] <= constants.CURRENT_Q_END)]
+        df = df[df[COL_DATE].notna() & (df[COL_DATE] >= constants.CURRENT_FY_QX_START) & (df[COL_DATE] <= constants.CURRENT_Q_END)]
         df = df.sort_values(COL_DATE, ascending=False).drop_duplicates(subset=[COL_ID], keep="first")
         df = df[df[COL_PROG].isin(VALID_PROGRAMS_ALL)]
 
@@ -156,7 +157,7 @@ def run_atwork_processing(
         df_src = df_raw.copy()
         if COL_DATE_ENTER in df_src.columns:
             df_src[COL_DATE_ENTER] = pd.to_datetime(df_src[COL_DATE_ENTER], errors="coerce")
-            df_src = df_src[df_src[COL_DATE_ENTER].notna() & (df_src[COL_DATE_ENTER] >= constants.CURRENT_Q_START) & (df_src[COL_DATE_ENTER] <= constants.CURRENT_Q_END)]
+            df_src = df_src[df_src[COL_DATE_ENTER].notna() & (df_src[COL_DATE_ENTER] >= constants.CURRENT_FY_QX_START) & (df_src[COL_DATE_ENTER] <= constants.CURRENT_Q_END)]
         
         df_src = df_src[df_src[COL_PROG].isin(VALID_PROGRAMS_NUM_DEN)]
         if COL_ASSESS in df_src.columns:
@@ -209,7 +210,7 @@ def run_atwork_processing(
             return prog in VALID_PROGRAMS_IMPACT
 
         program_eligible = df.apply(is_eligible, axis=1)
-        start_in_window  = start_parsed.notna() & (start_parsed >= constants.CURRENT_Q_START) & (start_parsed <= constants.CURRENT_Q_END)
+        start_in_window  = start_parsed.notna() & (start_parsed >= constants.CURRENT_FY_QX_START) & (start_parsed <= constants.CURRENT_Q_END)
         need_mask        = program_eligible & start_in_window
 
         COL_HSE = "Actively Pursing HSE_5575"
@@ -217,7 +218,7 @@ def run_atwork_processing(
         df["Need DL"] = df[COL_BARRIER].apply(needs_dl).where(need_mask, other=0) if COL_BARRIER in df.columns else 0
 
         for col in existing_ic_cols + existing_ext_cols:
-            df[col] = df[col].where(df[col].notna() & (df[col] >= constants.CURRENT_Q_START) & (df[col] <= constants.CURRENT_Q_END), other=pd.NaT)
+            df[col] = df[col].where(df[col].notna() & (df[col] >= constants.CURRENT_FY_QX_START) & (df[col] <= constants.CURRENT_Q_END), other=pd.NaT)
 
         df["Total IC"]   = df[existing_ic_cols].notna().sum(axis=1)
         df["At least 1"] = (df["Total IC"] >= 1).astype(int)
