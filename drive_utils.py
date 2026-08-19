@@ -27,7 +27,6 @@ def resolve_folder_id(drive_service, folder_name, folder_label="Folder"):
     """
     if not folder_name:
         return None
-        
     folder_id = find_folder_id(drive_service, folder_name)
     if not folder_id:
         raise ValueError(f"No {folder_label.lower()} folder found with name: {folder_name}")
@@ -36,7 +35,7 @@ def resolve_folder_id(drive_service, folder_name, folder_label="Folder"):
 def find_file_id(drive_service, filename, folder_id=None, mime_type=None):
     """
     Searches for a file by name and optional parent/MIME type.
-    Returns the file ID or None if not found.
+    Returns the file dict or None if not found.
     """
     query = f"name = '{filename}' and trashed = false"
     if folder_id:
@@ -55,33 +54,33 @@ def find_file_id(drive_service, filename, folder_id=None, mime_type=None):
     items = results.get('files', [])
     if not items:
         return None
-    
     if len(items) > 1:
         print(f"Warning: Found {len(items)} files with name '{filename}'. Using the first one.")
-    
     return items[0]
 
 def download_drive_file(drive_service, filename, folder_id=None):
     """
     Searches for a file and downloads it into a BytesIO stream.
-    Handles both binary files and Google Sheets (via CSV export).
-    Returns the stream and the parent folder ID.
+    Handles both binary files and Google Sheets (via XLSX export).
+    Returns (stream, parent_folder_id, file_id).
     """
     target = find_file_id(drive_service, filename, folder_id)
     if not target:
         raise FileNotFoundError(f"No file found with name: {filename}")
 
-    file_id = target['id']
+    file_id   = target['id']
     mime_type = target.get('mimeType', '')
-    parents = target.get('parents', [])
-    
+    parents   = target.get('parents', [])
+
     if not parents:
         raise ValueError(f"Could not determine parent folder for {filename}")
     parent_id = parents[0]
 
-    # Handle Google Sheets vs regular files
     if mime_type == 'application/vnd.google-apps.spreadsheet':
-        request = drive_service.files().export_media(fileId=file_id, mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        request = drive_service.files().export_media(
+            fileId=file_id,
+            mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
     else:
         request = drive_service.files().get_media(fileId=file_id)
 
@@ -109,16 +108,45 @@ def write_tab(ss, tab_name, dataframe, include_index=False, include_column_heade
     """
     Standardized helper to write a pandas DataFrame to a Google Sheet tab.
     Clears the tab if it exists, creates it if it doesn't.
+    - Uses ws.clear() to preserve worksheet ID (keeps Looker Studio connections intact)
+    - Uses value_input_option='RAW' to prevent Google Sheets from interpreting
+      integers as dates (fixes 1899-12-30 issue permanently)
     """
     try:
         ws = ss.worksheet(tab_name)
         ws.clear()
     except gspread.exceptions.WorksheetNotFound:
-        # Default sizing: rows based on data + buffer, columns based on data + buffer
         rows = max(100, len(dataframe) + 100)
         cols = max(20, len(dataframe.columns) + 5)
         ws = ss.add_worksheet(title=tab_name, rows=rows, cols=cols)
-    
-    set_with_dataframe(ws, dataframe, include_index=include_index, include_column_header=include_column_header)
+
+    # Convert columns to safe types before writing
+    df_write = dataframe.copy()
+    for col in df_write.columns:
+        if pd.api.types.is_datetime64_any_dtype(df_write[col]):
+            df_write[col] = df_write[col].dt.strftime("%Y-%m-%d").fillna("")
+        elif pd.api.types.is_integer_dtype(df_write[col]):
+            df_write[col] = df_write[col].fillna(0).astype(int)
+        elif pd.api.types.is_float_dtype(df_write[col]):
+            df_write[col] = df_write[col].fillna(0)
+        else:
+            df_write[col] = df_write[col].fillna("")
+
+    # Use gspread's update with RAW input to prevent date interpretation
+    # Convert all values to JSON-serializable types
+    import math
+    def to_safe(val):
+        if val is None: return ""
+        if val is pd.NaT: return ""
+        if isinstance(val, float) and math.isnan(val): return ""
+        if hasattr(val, 'isoformat'): return val.isoformat()  # datetime/date/Timestamp
+        if hasattr(val, 'item'): return val.item()  # numpy types
+        return val
+
+    if include_column_header:
+        data = [df_write.columns.tolist()] + [[to_safe(v) for v in row] for row in df_write.values.tolist()]
+    else:
+        data = [[to_safe(v) for v in row] for row in df_write.values.tolist()]
+    ws.update(data, value_input_option='RAW')
     print(f"   ✅ '{tab_name}' written ({len(dataframe)} rows)")
-    time.sleep(1) # Respect API rate limits
+    time.sleep(1)  # Respect API rate limits
