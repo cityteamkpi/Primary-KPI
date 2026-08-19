@@ -53,6 +53,7 @@ def run_utilization_processing(
     report_stream, _, _ = download_drive_file(drive_service, input_report_file, input_folder_id)
 
     df_raw = load_raw(report_stream, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
+    print(f"DEBUG: Total clients found in report: {len(df_raw)}")
 
     # print("DEBUG: df_raw loaded:\n", df_raw)
 
@@ -83,7 +84,7 @@ def run_utilization_processing(
         program_col = df_raw.columns[0]
 
     spreadsheet = gc.open_by_key(utilization_file_id)
-    tabs_to_update = ["Renew", "Men Turning Point", "Women Turning Point"]
+    tabs_to_update = ["Renew", "Men Turning Point", "Women Turning Point","Forward","Program Interns","Other","APH","Elevate"]
 
     # Identify relevant programs from the tabs to filter the debug output
     tracked_programs = set()
@@ -98,7 +99,7 @@ def run_utilization_processing(
     program_counts = df_raw[program_col].astype(str).str.strip().value_counts()
     # Filter to only show programs that are currently listed in the tracking tabs
     filtered_counts = program_counts[program_counts.index.isin(tracked_programs)]
-    # print(f"DEBUG: Program enrollment counts (filtered for tracking tabs):\n{filtered_counts}")
+    print(f"DEBUG: Program enrollment counts (filtered for tracking tabs):\n{filtered_counts}")
 
 
     #==========================================================================
@@ -116,14 +117,16 @@ def run_utilization_processing(
 
         df_sheet = get_as_dataframe(sheet)
         
-        # Cleanup and set index
-        df_sheet = df_sheet.dropna(how='all').dropna(axis=1, how='all')
-        if not df_sheet.empty:
+        # Cleanup: drop rows that are all NaN. 
+        # To add new programs to track, simply add a new column in the appropriate tab
+        df_sheet = df_sheet.dropna(how='all')
+
+        if not df_sheet.columns.empty:
             df_sheet = df_sheet.set_index(df_sheet.columns[0])
             # Ignore unnamed columns (likely garbage or empty artifacts)
-            df_sheet = df_sheet.loc[:, ~df_sheet.columns.str.match(r'^Unnamed')]
-            df_sheet.index.name = 'Date'
-        
+            df_sheet = df_sheet.loc[:, ~df_sheet.columns.astype(str).str.match(r'^Unnamed')]
+
+        df_sheet.index.name = 'Date'
         df_sheet = df_sheet.copy()
 
         # Standardize index to match string-based date format
@@ -138,6 +141,9 @@ def run_utilization_processing(
             clean_prog = str(program).strip()
             count = int(program_counts.get(clean_prog, 0))
             df_sheet.loc[today_date, program] = count
+
+        # Explicitly set the index name before resetting to prevent the creation of an "index" column
+        df_sheet.index.name = 'Date'
 
         # Write back to Google Sheet using standardized helper
         write_tab(spreadsheet, tab_name, df_sheet.reset_index())
