@@ -87,8 +87,22 @@ def download_drive_file(drive_service, filename, folder_id=None):
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
     done = False
+    max_retries = 5
+
     while not done:
-        _, done = downloader.next_chunk()
+        for attempt in range(max_retries):
+            try:
+                status, done = downloader.next_chunk()
+                if status:
+                    print(f"   Download Progress: {int(status.progress() * 100)}%", end="\r")
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    print(f"\n❌ Failed to download chunk for {filename} after {max_retries} attempts.")
+                    raise e
+                wait_time = 2 ** attempt
+                print(f"\n⚠️ Download timeout/error: {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
 
     fh.seek(0)
     return fh, parent_id, file_id

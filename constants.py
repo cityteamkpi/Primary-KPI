@@ -32,6 +32,26 @@ VALID_PROGRAMS_NUM_DEN = {"San Jose Men Renew", "GV Renew"}
 VALID_PROGRAMS_IMPACT = VALID_PROGRAMS_ALL
 VALID_INTERN_PROGRAMS_IMPACT = VALID_PROGRAMS_ALL - {"Program Graduate Intern"}
 
+BARRIER_REMAP = {
+    "No driver's license": "Driver's License",
+    "Suspended driver's license": "Driver's License",
+    "Lack of stable housing": "Housing",
+    "Criminal Record": "Background Check",
+    "No high school diploma or GED": "Education"
+}
+
+IC_DATE_COLS = [
+    "Individual Coaching Session 1 Date",
+    "Individual Coaching Session 2 Date",
+    "Individual Coaching Session 3 Date",
+    "Individual Coaching Session 4 Date",
+    "Individual Coaching Session 5 Date"
+]
+
+EXTRA_WINDOW_COLS = [
+    "Date Entered CityTeam @ Work_3842",
+    "Employment Start Date_3850"
+]
 
 # Generate Forward Map variations programmatically to avoid key repetition
 _FORWARD_BASE = {
