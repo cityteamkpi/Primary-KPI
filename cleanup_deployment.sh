@@ -1,6 +1,6 @@
 #!/bin/bash
 # Source environment variables (Project ID, Region, Credentials)
-source /home/kpi/ct-kpi-automation/setup-deploy-env.sh
+source "$(dirname "$0")/setup-deploy-env.sh"
 
 echo "Attempting to delete Cloud Function: nightly-cleanup-job in region: $REGION..."
 gcloud functions delete nightly-cleanup-job --region="$REGION" --quiet

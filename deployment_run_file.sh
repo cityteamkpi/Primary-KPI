@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-source /home/kpi/ct-kpi-automation/setup-deploy-env.sh
+source "$(dirname "$0")/setup-deploy-env.sh"
 
 # Dynamically retrieve the Project Number to construct the Service Account email
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
