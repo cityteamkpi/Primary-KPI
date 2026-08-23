@@ -66,6 +66,24 @@ def run_renew_processing(
     # =========================================================================
     # 3. Processing Functions
     # =========================================================================
+
+    def categorize_exit_reason(val):
+        if pd.isna(val) or str(val).strip() == "": return None
+        v = str(val).lower().strip()
+        if any(x in v for x in ['graduation', 'completer', 'completion', 'internship ended']): return "Graduation"
+        if any(x in v for x in ['relapse', 'drug', 'detox', 'fentanyl', 'paraph', 'blackout', 'deviating']): return "Relapse"
+        if any(x in v for x in ['discipline', 'conduct', 'behavior', 'threat', 'violence', 'awol', '30 day review', 'incident']): return "Discipline"
+        if any(x in v for x in ['family', 'child', 'wife', 'daughter', 'son', 'mother', 'reunif']): return "Family"
+        if any(x in v for x in ['medical', 'mental', 'health', 'hospital', 'cognitive', 'ssi', 'out of scope']): return "Medical/Mental Health"
+        if any(x in v for x in ['legal', 'parole', 'probation', 'warrant', 'criminal', 'remanded', 'county', 'immigr']): return "Legal"
+        if any(x in v for x in ['transfer', 'another program', 'different program', 'forward', 'other program']): return "Transfer"
+        if any(x in v for x in ['housing', 'sle', 'perm housing']): return "Housing"
+        if any(x in v for x in ['job', 'work', 'employ']): return "Job"
+        if any(x in v for x in ['relationship']): return "Relationship"
+        if any(x in v for x in ['not eligible', 'duplicate', 'accident', 'test client', 'mistake', 'lied', 'restart', 'not accepted']): return "Not Eligible/Admin"
+        if any(x in v for x in ['self', 'not ready', 'voluntary', 'chose', 'decided', 'walked', 'left', "wasn't ready", 'refused']): return "Self Exit"
+        return "Unknown/Other"
+
     def fmt_date(df, col):
         return pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
 
@@ -82,6 +100,7 @@ def run_renew_processing(
         df["Quarter"]  = df[COL_EXIT_DATE].apply(constants.get_fiscal_quarter)
         df["Year Q"]   = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
         df["Current FY Goal"]        = df[COL_PROGRAM].map(constants.PROGRAM_GOALS)
+        df["Next FY Goal"]           = df[COL_PROGRAM].map(constants.NEXT_FY_GRAD_GOALS)
         df["Current FY Projection"]  = df[COL_PROGRAM].map(constants.PROGRAM_PROJECTIONS)
         df["Capacity"]               = df[COL_PROGRAM].map(constants.PROGRAM_CAPACITY)
         df["Theoretical Maximum"]    = df[COL_PROGRAM].map(constants.PROGRAM_THEORETICAL_MAX)
@@ -92,7 +111,7 @@ def run_renew_processing(
         # Explicit column selection
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
                 "City", "Year", "Quarter", "Year Q",
-                "Current FY Goal", "Current FY Projection", "Capacity", "Theoretical Maximum"
+                "Current FY Goal", "Next FY Goal", "Current FY Projection", "Capacity", "Theoretical Maximum"
                 ] + list(constants.ACTUALS_WINDOWS.keys())
         df = df[[c for c in cols if c in df.columns]].copy()
 
@@ -119,14 +138,15 @@ def run_renew_processing(
         df["City"] = df[COL_PROGRAM].apply(constants.assign_city)
         df[constants.OCC_PRIOR_LABEL]   = df.apply(lambda r: was_active_on(r[COL_START_DATE], r[COL_EXIT_DATE], constants.OCC_PRIOR_DATE), axis=1)
         df[constants.OCC_CURRENT_LABEL] = df.apply(lambda r: was_active_on(r[COL_START_DATE], r[COL_EXIT_DATE], constants.OCC_CURRENT_DATE), axis=1)
-        df["Capacity"]         = df[COL_PROGRAM].map(constants.OCCUPANCY_CAPACITY)
-        df["Goal"]             = df[COL_PROGRAM].map(constants.OCCUPANCY_GOAL)
+        df["Capacity"]           = df[COL_PROGRAM].map(constants.OCCUPANCY_CAPACITY)
+        df["Goal"]               = df[COL_PROGRAM].map(constants.OCCUPANCY_GOAL)
+        df["Next FY Goal"]       = df[COL_PROGRAM].map(constants.NEXT_FY_OCC_GOALS)
         df["Prior FY Occupancy"] = df[COL_PROGRAM].map(constants.OCCUPANCY_PRIOR_FY)
 
         # Explicit column selection
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE,
                 "City", constants.OCC_PRIOR_LABEL, constants.OCC_CURRENT_LABEL,
-                "Capacity", "Goal", "Prior FY Occupancy"]
+                "Capacity", "Goal", "Next FY Goal", "Prior FY Occupancy"]
         df = df[[c for c in cols if c in df.columns]].copy()
 
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
@@ -147,24 +167,34 @@ def run_renew_processing(
         gap    = (df[COL_EXIT_DATE] - df[COL_START_DATE]).dt.days
         df["City"]     = df[COL_PROGRAM].apply(constants.assign_city)
         df["Capacity"] = df[COL_PROGRAM].map(constants.PROGRAM_CAPACITY)
-        df["Year"]    = df[COL_START_DATE].apply(constants.get_fiscal_year)
-        df["Quarter"] = df[COL_START_DATE].apply(constants.get_fiscal_quarter)
+        date_for_year = df[COL_EXIT_DATE].where(df[COL_EXIT_DATE].notna(), df[COL_START_DATE])
+        df["Year"]    = date_for_year.apply(constants.get_fiscal_year)
+        df["Quarter"] = date_for_year.apply(constants.get_fiscal_quarter)
         df["Year Q"]  = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
 
-        df["Entered Since Prior FY"] = ((df[COL_START_DATE] >= cutoff) & (df[COL_EXIT_DATE].isna() | (gap > 30))).astype(int)
-        df["Exit After 30 Days"]     = ((df[COL_START_DATE] >= cutoff) & df[COL_EXIT_DATE].notna() & (gap > 30) & (~df[COL_EXIT_REASON].isin(GRAD_REASONS))).astype(int)
-        df["Graduated"]              = ((df[COL_START_DATE] >= cutoff) & df[COL_EXIT_REASON].isin(GRAD_REASONS)).astype(int)
-        df["Still in Program"]       = ((df[COL_START_DATE] >= cutoff) & df[COL_EXIT_DATE].isna()).astype(int)
+        df["Exit Reason Category"]  = df[COL_EXIT_REASON].apply(categorize_exit_reason)
+        df["Entered Since Prior FY"] = (df[COL_EXIT_DATE].isna() | (gap > 30)).astype(int)
+        df["Exit After 30 Days"]     = (df[COL_EXIT_DATE].notna() & (gap > 30) & (~df[COL_EXIT_REASON].isin(GRAD_REASONS))).astype(int)
+        df["Exit Before 30 Days"]  = (
+            df[COL_EXIT_DATE].notna() &
+            (df[COL_EXIT_DATE] >= constants.CURRENT_Q_START) &
+            (df[COL_EXIT_DATE] <= constants.CURRENT_Q_END) &
+            (gap < 30)
+        ).astype(int)
+        df["Graduated"]              = (df[COL_EXIT_REASON].isin(GRAD_REASONS)).astype(int)
+        df["Still in Program"]       = (df[COL_EXIT_DATE].isna()).astype(int)
 
         # Explicit column selection
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
-                "City", "Year", "Quarter", "Year Q", "Capacity",
-                "Entered Since Prior FY", "Exit After 30 Days", "Graduated", "Still in Program"]
+                "Exit Reason Category", "City", "Year", "Quarter", "Year Q", "Capacity",
+                "Entered Since Prior FY", "Exit After 30 Days", "Exit Before 30 Days",
+                "Graduated", "Still in Program"]
         df = df[[c for c in cols if c in df.columns]].copy()
 
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
         df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
-        for col in ["Capacity", "Entered Since Prior FY", "Exit After 30 Days", "Graduated", "Still in Program"]:
+        for col in ["Capacity", "Entered Since Prior FY", "Exit After 30 Days", "Exit Before 30 Days",
+                    "Graduated", "Still in Program"]:
             if col in df.columns: df[col] = df[col].fillna(0).astype(int)
         return df.reset_index(drop=True)
 

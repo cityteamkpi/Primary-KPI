@@ -99,7 +99,8 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
 
     # Recent wage — from most recent post-grad checkin; fallback to grad wage if no post-grad data
     _recent_wage_val = merged_row["recent_wage"].iloc[0] if not merged_row.empty and "recent_wage" in merged_row.columns else None
-    recent_wage = float(_recent_wage_val) if _recent_wage_val is not None and pd.notna(_recent_wage_val) and float(_recent_wage_val) > 0 else grad_wage
+    # If post-grad data exists use it (even if $0); only fall back to grad_wage if no post-grad data
+    recent_wage = float(_recent_wage_val) if _recent_wage_val is not None and pd.notna(_recent_wage_val) else grad_wage
     _recent_checkin_val = merged_row["recent_checkin"].iloc[0] if not merged_row.empty and "recent_checkin" in merged_row.columns else None
     recent_checkin = _recent_checkin_val if _recent_checkin_val is not None and pd.notna(_recent_checkin_val) else pd.NaT
 
@@ -148,6 +149,31 @@ def run_alum_processing(
     drive_service, gc, _ = get_services()
     constants.sync_constants()
 
+    # ── Alumni-specific windows ───────────────────────────────────────────────
+    import calendar as _cal
+    def _shift_back(ts, months):
+        m = ts.month - months
+        y = ts.year + (m - 1) // 12
+        m = ((m - 1) % 12) + 1
+        return pd.Timestamp(f"{y}-{m:02d}-{min(ts.day, _cal.monthrange(y, m)[1]):02d}")
+
+    # Sobriety: 7 quarters back; if Q4, extend to include Q3
+    SOBRIETY_START = _shift_back(constants.CURRENT_Q_START, 21)
+    if constants.get_fiscal_quarter(SOBRIETY_START) == "Q4":
+        SOBRIETY_START = _shift_back(SOBRIETY_START, 3)
+    SOBRIETY_END = _shift_back(constants.CURRENT_Q_END, 21)
+
+    # LW & Housing: one year ago same Q; Q4 uses prior Q3 instead
+    if constants.Q_LABEL == "Q4":
+        LW_HOUSING_START = pd.Timestamp(f"{constants.fy_num - 1}-03-01")
+        LW_HOUSING_END   = pd.Timestamp(f"{constants.fy_num - 1}-05-31")
+    else:
+        LW_HOUSING_START = constants.CURRENT_Q_START - pd.DateOffset(years=1)
+        LW_HOUSING_END   = constants.CURRENT_Q_END - pd.DateOffset(years=1)
+
+    print(f"   Sobriety window  : {SOBRIETY_START.date()} – {SOBRIETY_END.date()}")
+    print(f"   LW/Housing window: {LW_HOUSING_START.date()} – {LW_HOUSING_END.date()}")
+
     # 1. Download and Load Data
     input_folder_id = resolve_folder_id(drive_service, input_folder_name, "Input")
     output_folder_id = resolve_folder_id(drive_service, output_folder_name, "Output")
@@ -168,15 +194,28 @@ def run_alum_processing(
     # Remap House of Grace once
     df_raw_parsed[COL_PROGRAM] = df_raw_parsed[COL_PROGRAM].replace("House of Grace", "GV Renew")
 
-    df_grads = df_raw_parsed[
+    # Filter to graduation rows:
+    # 1. How Checked in GRAD_REASONS (primary filter)
+    # 2. Primary Reason for Exit also in GRAD_REASONS (secondary verification)
+    df_grads_all = df_raw_parsed[
         df_raw_parsed[COL_PROGRAM].isin(RENEW_PROGRAMS) &
+        df_raw_parsed[COL_HOW_CHECKED].isin(GRAD_REASONS) &
         df_raw_parsed[COL_EXIT_REASON].isin(GRAD_REASONS) &
         df_raw_parsed[COL_EXIT_DATE].notna()
-    ].drop_duplicates(subset=[COL_NAME, COL_PROGRAM, COL_EXIT_DATE]).reset_index(drop=True)
+    ].copy()
+
+    # Dedup: keep all unique graduation dates per client per program
+    df_grads_all[COL_EXIT_DATE] = pd.to_datetime(df_grads_all[COL_EXIT_DATE], errors="coerce")
+    df_grads_all[COL_CHECKIN]   = pd.to_datetime(df_grads_all[COL_CHECKIN],   errors="coerce")
+    df_grads = (
+        df_grads_all
+        .drop_duplicates(subset=[COL_NAME, COL_PROGRAM, COL_EXIT_DATE], keep="first")
+        .reset_index(drop=True)
+    )
 
     # df_merged: max wage/housing across all rows sharing the same graduation date
     _grad_rows = df_raw_parsed[
-        df_raw_parsed[COL_EXIT_REASON].isin(GRAD_REASONS) &
+        df_raw_parsed[COL_HOW_CHECKED].isin(GRAD_REASONS) &
         df_raw_parsed[COL_PROGRAM].isin(RENEW_PROGRAMS) &
         df_raw_parsed[COL_EXIT_DATE].notna()
     ].copy()
@@ -227,7 +266,7 @@ def run_alum_processing(
     # --- Sobriety Tab ---
     df_sobriety = results_df[
         results_df["Graduation Date"].notna() &
-        results_df["Graduation Date"].between(constants.SOBRIETY_START, constants.SOBRIETY_END)
+        results_df["Graduation Date"].between(SOBRIETY_START, SOBRIETY_END)
     ].copy()
     df_sobriety["Sobriety 1 Year"] = df_sobriety["is_sober"].astype(int)
     df_sobriety = df_sobriety[[
@@ -235,21 +274,27 @@ def run_alum_processing(
         "City", "Year", "Quarter", "Year Q", "Sustained Relapse?", "Sobriety 1 Year"
     ]].copy()
 
-    # --- LW & Housing Tabs ---
-    df_base_lw_h = results_df[
+    # --- LW Tab: all graduates in window (sober and relapsed)
+    df_base_lw = results_df[
         results_df["Graduation Date"].notna() &
-        results_df["Graduation Date"].between(constants.LW_HOUSING_START, constants.LW_HOUSING_END) &
+        results_df["Graduation Date"].between(LW_HOUSING_START, LW_HOUSING_END) &
         (results_df["is_sober"] == True)
     ].copy()
 
-    df_lw = df_base_lw_h[[
+    # --- Housing Tab: sober graduates only
+    df_base_lw_h = results_df[
+        results_df["Graduation Date"].notna() &
+        results_df["Graduation Date"].between(LW_HOUSING_START, LW_HOUSING_END) &
+        (results_df["is_sober"] == True)
+    ].copy()
+
+    df_lw = df_base_lw[[
         COL_NAME, COL_PROGRAM, "Graduation Date", "Most Recent Checkin", "City",
         "Year", "Quarter", "Year Q", "LW Criteria", "Wage (Grad)", "Pays LW? (Grad)",
         "Wage (Recent)", "Pays LW? (Recent)"
     ]].copy()
 
-    df_housing = df_base_lw_h[[
-        COL_NAME, COL_PROGRAM, "Graduation Date", "Most Recent Checkin", "City",
+    df_housing = df_base_lw_h[[        COL_NAME, COL_PROGRAM, "Graduation Date", "Most Recent Checkin", "City",
         "Year", "Quarter", "Year Q", "Housing Under 30% (Grad)", "Housing Under 30% (Recent)"
     ]].copy()
 

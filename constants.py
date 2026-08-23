@@ -32,27 +32,6 @@ VALID_PROGRAMS_NUM_DEN = {"San Jose Men Renew", "GV Renew"}
 VALID_PROGRAMS_IMPACT = VALID_PROGRAMS_ALL
 VALID_INTERN_PROGRAMS_IMPACT = VALID_PROGRAMS_ALL - {"Program Graduate Intern"}
 
-BARRIER_REMAP = {
-    "No driver's license": "Driver's License",
-    "Suspended driver's license": "Driver's License",
-    "Lack of stable housing": "Housing",
-    "Criminal Record": "Background Check",
-    "No high school diploma or GED": "Education"
-}
-
-IC_DATE_COLS = [
-    "Individual Coaching Session 1 Date",
-    "Individual Coaching Session 2 Date",
-    "Individual Coaching Session 3 Date",
-    "Individual Coaching Session 4 Date",
-    "Individual Coaching Session 5 Date"
-]
-
-EXTRA_WINDOW_COLS = [
-    "Date Entered CityTeam @ Work_3842",
-    "Employment Start Date_3850"
-]
-
 # Generate Forward Map variations programmatically to avoid key repetition
 _FORWARD_BASE = {
     "GV Men's Forward": "San Jose Men Renew",
@@ -83,7 +62,6 @@ PP_FY_START = PP_FY_END = PP_FY_QX_END = None
 PPP_FY_START = PPP_FY_END = PPP_FY_QX_END = None
 FY_START = FY_END = RETENTION_START_CUTOFF = None
 OCC_CURRENT_DATE = OCC_PRIOR_DATE = None
-SOBRIETY_START = SOBRIETY_END = LW_HOUSING_START = LW_HOUSING_END = None
 FY_QUARTERS = []
 
 OCC_CURRENT_LABEL, OCC_PRIOR_LABEL = "Current Period Actuals", "Prior Period Actuals"
@@ -92,6 +70,8 @@ ACTUALS_WINDOWS, PROGRAM_GOALS, PROGRAM_PROJECTIONS = {}, {}, {}
 PROGRAM_CAPACITY, PROGRAM_THEORETICAL_MAX = {}, {}
 OCCUPANCY_CAPACITY, OCCUPANCY_GOAL, OCCUPANCY_PRIOR_FY = {}, {}, {}
 LW_CRITERIA, TP_CAPACITY, TP_GOAL, TP_PRIOR_FY = {}, {}, {}, {}
+NEXT_FY_GRAD_GOALS, NEXT_FY_OCC_GOALS = {}, {}        # Renew
+NEXT_FY_GRAD_GOALS_TP, NEXT_FY_OCC_GOALS_TP = {}, {}  # Turning Point
 
 
 # ============================================================
@@ -159,23 +139,51 @@ def sync_constants():
             target_dict[prog] = get_val(row, col)
         LW_CRITERIA[prog] = get_val(8 + (idx * 2), 10)  # Col K
 
+    # Load Next FY Goals from FY27 Goals tab
+    try:
+        fy27_data = sheets_service.spreadsheets().values().get(
+            spreadsheetId=target_file['id'], range="'FY27 Goals'!A1:J50"
+        ).execute().get("values", [])
+
+        def get_fy27(r_idx, c_idx):
+            try:
+                val = fy27_data[r_idx][c_idx]
+                return float(str(val).replace("$", "").replace(",", "").strip())
+            except (IndexError, ValueError, TypeError):
+                return None
+
+        # Renew: Col B (Graduates), Col D (Occupancy)
+        NEXT_FY_GRAD_GOALS.clear()
+        NEXT_FY_OCC_GOALS.clear()
+        next_fy_renew_rows = [6, 10, 14, 18, 22]  # rows 7,11,15,19,23 (0-indexed)
+        for prog, row in zip(sorted_renew, next_fy_renew_rows):
+            NEXT_FY_GRAD_GOALS[prog] = get_fy27(row, 1)  # Col B
+            NEXT_FY_OCC_GOALS[prog]  = get_fy27(row, 3)  # Col D
+
+        # Turning Point: Col G (Graduates), Col I (Occupancy)
+        NEXT_FY_GRAD_GOALS_TP.clear()
+        NEXT_FY_OCC_GOALS_TP.clear()
+        tp_next_fy_rows = [6, 10, 14, 18, 22, 26, 30, 34, 38, 42]  # rows 7,11,15,19,23,27,31,35,39,43
+        tp_next_fy_programs = [
+            "Chester Men Turning Point", "Chester Women Turning Point",
+            "Oakland Men Turning Point", "Oakland Women Turning Point",
+            "Portland Community of Hope", "Portland Men Turning Point",
+            "GV Turning Point", "Heritage Home",
+            "San Jose Men Turning Point", "San Jose Youth Collective"
+        ]
+        for prog, row in zip(tp_next_fy_programs, tp_next_fy_rows):
+            NEXT_FY_GRAD_GOALS_TP[prog] = get_fy27(row, 6)  # Col G
+            NEXT_FY_OCC_GOALS_TP[prog]  = get_fy27(row, 8)  # Col I
+        print("✅ Next FY Goals loaded.")
+    except Exception as e:
+        print(f"⚠️  Could not load FY27 Goals tab: {e}")
+
     # Matrix Loading for Turning Point Programs (Cols M, N, O)
     tp_col_map = [(TP_CAPACITY, 12), (TP_GOAL, 13), (TP_PRIOR_FY, 14)]
     for idx, prog in enumerate(TP_PROGRAMS):
         row = 9 + (idx * 4)
         for target_dict, col in tp_col_map:
             target_dict[prog] = get_val(row, col)
-
-    # Shift Back Helper for Alumni Windows
-    def _shift_back(ts, months):
-        m = ts.month - months
-        y = ts.year + (m - 1) // 12
-        m = ((m - 1) % 12) + 1
-        return pd.Timestamp(f"{y}-{m:02d}-{min(ts.day, calendar.monthrange(y, m)[1]):02d}")
-
-    sobriety_start = _shift_back(cur_q_start, 21)
-    if get_fiscal_quarter(sobriety_start) == "Q4":
-        sobriety_start = _shift_back(sobriety_start, 3)
 
     # Global State Update
     globals().update({
@@ -196,22 +204,23 @@ def sync_constants():
         "FY_START": fy_start, "FY_END": pd.Timestamp(f"{fy}-08-31"),
         "RETENTION_START_CUTOFF": pd.Timestamp(f"{fy - 2}-09-01"),
         "OCC_CURRENT_DATE": cur_q_end, "OCC_PRIOR_DATE": prior_fy_qx_end,
-        "SOBRIETY_START": sobriety_start,
-        "SOBRIETY_END": _shift_back(cur_q_end, 21),
-        "LW_HOUSING_START": pd.Timestamp(f"{fy - 2}-09-01") if q_lbl == "Q4" else cur_q_start - pd.DateOffset(years=1),
-        "LW_HOUSING_END": pd.Timestamp(f"{fy - 1}-08-31") if q_lbl == "Q4" else cur_q_end - pd.DateOffset(years=1),
-        "FY_QUARTERS": generate_fy_quarters(fy)
+
+        "FY_QUARTERS": generate_fy_quarters(fy),
+        "NEXT_FY_GRAD_GOALS": NEXT_FY_GRAD_GOALS,
+        "NEXT_FY_OCC_GOALS": NEXT_FY_OCC_GOALS,
+        "NEXT_FY_GRAD_GOALS_TP": NEXT_FY_GRAD_GOALS_TP,
+        "NEXT_FY_OCC_GOALS_TP": NEXT_FY_OCC_GOALS_TP,
     })
 
     ACTUALS_WINDOWS.clear()
     ACTUALS_WINDOWS.update({
-        "Current Period Actuals": (FY_START, CURRENT_Q_END),
-        "Prior Period Actuals": (PRIOR_FY_QX_START, PRIOR_FY_QX_END),
-        "2 Years Ago Period Actuals": (PP_FY_START, PP_FY_QX_END),
-        "3 Years Ago Period Actuals": (PPP_FY_START, PPP_FY_QX_END),
-        "Prior Year Actuals": (pd.Timestamp(f"{fy - 2}-09-01"), pd.Timestamp(f"{fy - 1}-08-31")),
-        "2 Years Ago Actuals": (PP_FY_START, PP_FY_END),
-        "3 Years Ago Actuals": (PPP_FY_START, PPP_FY_END),
+        "Current Period Actuals"    : (fy_start, cur_q_end),
+        "Prior Period Actuals"      : (pd.Timestamp(f"{prior_fy_num - 1}-09-01"), prior_fy_qx_end),
+        "2 Years Ago Period Actuals": (pd.Timestamp(f"{fy - 3}-09-01"), prior_fy_qx_end - pd.DateOffset(years=1)),
+        "3 Years Ago Period Actuals": (pd.Timestamp(f"{fy - 4}-09-01"), prior_fy_qx_end - pd.DateOffset(years=2)),
+        "Prior Year Actuals"        : (pd.Timestamp(f"{fy - 2}-09-01"), pd.Timestamp(f"{fy - 1}-08-31")),
+        "2 Years Ago Actuals"       : (pd.Timestamp(f"{fy - 3}-09-01"), pd.Timestamp(f"{fy - 2}-08-31")),
+        "3 Years Ago Actuals"       : (pd.Timestamp(f"{fy - 4}-09-01"), pd.Timestamp(f"{fy - 3}-08-31")),
     })
 
     print(f"✅ All dynamic constants loaded for {FY_LABEL} {Q_LABEL}.")

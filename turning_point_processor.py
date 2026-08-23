@@ -95,17 +95,18 @@ def run_turning_point_processing(
             mask &= df[COL_EXIT_REASON].isin(reasons_list)
         df = df[mask].copy()
 
-        df["City"]    = df[COL_PROGRAM].apply(constants.assign_city)
-        df["Year"]    = df[COL_EXIT_DATE].apply(constants.get_fiscal_year)
-        df["Quarter"] = df[COL_EXIT_DATE].apply(constants.get_fiscal_quarter)
-        df["Year Q"]  = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
+        df["City"]        = df[COL_PROGRAM].apply(constants.assign_city)
+        df["Year"]        = df[COL_EXIT_DATE].apply(constants.get_fiscal_year)
+        df["Quarter"]     = df[COL_EXIT_DATE].apply(constants.get_fiscal_quarter)
+        df["Year Q"]      = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
+        df["Next FY Goal"] = df[COL_PROGRAM].map(constants.NEXT_FY_GRAD_GOALS_TP)
 
         for k, (w_start, w_end) in constants.ACTUALS_WINDOWS.items():
             df[k] = (df[COL_EXIT_DATE].notna() & (df[COL_EXIT_DATE] >= w_start) & (df[COL_EXIT_DATE] <= w_end)).astype(int)
 
         # Explicit column selection
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
-                "City", "Year", "Quarter", "Year Q"] + list(constants.ACTUALS_WINDOWS.keys())
+                "City", "Year", "Quarter", "Year Q", "Next FY Goal"] + list(constants.ACTUALS_WINDOWS.keys())
         df = df[[c for c in cols if c in df.columns]].copy()
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
         df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
@@ -126,11 +127,21 @@ def run_turning_point_processing(
                 .drop_duplicates(subset=[COL_RECORD_ID], keep="first")
                 .drop(columns=["_no_exit"]))
 
-        COL_CHILD = "Name of Child_6313"
-
         df["City"] = df[COL_PROGRAM].apply(constants.assign_city)
         df[constants.OCC_PRIOR_LABEL]   = df.apply(lambda r: was_active_on(r[COL_START_DATE], r[COL_EXIT_DATE], constants.OCC_PRIOR_DATE), axis=1)
         df[constants.OCC_CURRENT_LABEL] = df.apply(lambda r: was_active_on(r[COL_START_DATE], r[COL_EXIT_DATE], constants.OCC_CURRENT_DATE), axis=1)
+
+        COL_CHILD = "Name of Child_6313"
+
+        # For GV TP: if deduped row has null Name of Child, look up from any row with a value
+        if COL_CHILD in df.columns:
+            is_gv_tp_null = (df[COL_PROGRAM] == "GV Turning Point") & df["Name of Child_6313"].isna()
+            if is_gv_tp_null.any():
+                child_lookup = df_base[df_base[COL_PROGRAM] == "GV Turning Point"].dropna(subset=["Name of Child_6313"])
+                child_lookup = child_lookup.groupby(COL_RECORD_ID)["Name of Child_6313"].first()
+                df.loc[is_gv_tp_null, "Name of Child_6313"] = df.loc[is_gv_tp_null, COL_RECORD_ID].map(child_lookup)
+
+
 
         # GV Turning Point exception: count children from Name of Child_6313
         # If Name of Child is not null → use child count
@@ -155,13 +166,18 @@ def run_turning_point_processing(
                         pass
         # Ensure OCC_CURRENT_LABEL is always int
         df[constants.OCC_CURRENT_LABEL] = pd.to_numeric(df[constants.OCC_CURRENT_LABEL], errors="coerce").fillna(0).astype(int)
+
+        # Sync Current Period Actuals with OCC_CURRENT_LABEL (includes child count for GV TP)
+        if "Current Period Actuals" in df.columns:
+            df["Current Period Actuals"] = df[constants.OCC_CURRENT_LABEL]
         df["Capacity"]           = df[COL_PROGRAM].map(constants.TP_CAPACITY)
         df["Goal"]               = df[COL_PROGRAM].map(constants.TP_GOAL)
+        df["Next FY Goal"]       = df[COL_PROGRAM].map(constants.NEXT_FY_OCC_GOALS_TP)
         df["Prior FY Occupancy"] = df[COL_PROGRAM].map(constants.TP_PRIOR_FY)
 
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE,
                 "City", constants.OCC_PRIOR_LABEL, constants.OCC_CURRENT_LABEL,
-                "Capacity", "Goal", "Prior FY Occupancy"]
+                "Name of Child_6313", "Capacity", "Goal", "Next FY Goal", "Prior FY Occupancy"]
         df = df[[c for c in cols if c in df.columns]].copy()
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
         df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
@@ -188,7 +204,7 @@ def run_turning_point_processing(
         df["_is_housed"]        = df[COL_HOUSED].astype(str).str.contains("Yes", case=False, na=False).astype(int) if COL_HOUSED in df.columns else 0
         df["_is_exited_housed"] = (df[COL_EXIT_DATE].notna() & (df["_is_housed"] == 1)).astype(int)
 
-        df = (df.sort_values(["_is_exited_housed", "_is_housed", COL_EXIT_DATE, COL_START_DATE], ascending=[False, False, False, False])
+        df = (df.sort_values(COL_EXIT_DATE, ascending=False)
                 .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM], keep="first")
                 .drop(columns=["_is_housed", "_is_exited_housed"]))
 
@@ -221,7 +237,7 @@ def run_turning_point_processing(
     # 4. Execute Processing
     # =========================================================================
     print("Processing Graduates...")
-    df_grad = process_exited_category(df_base, reasons_list=GRAD_REASONS)
+    df_grad = process_exited_category(df_base, reasons_list=["Graduation"])
 
 
 
