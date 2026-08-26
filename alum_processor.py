@@ -61,7 +61,7 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
     # --- Sobriety Logic ---
     sober_records = person_records[
         person_records[COL_SOBER].isin(["Yes", "No"]) &
-        (person_records[COL_CHECKIN] >= grad_date)
+        (person_records[COL_CHECKIN] > grad_date)
     ] if COL_SOBER in person_records.columns else pd.DataFrame()
     has_sustained_relapse = False
     last_state = None
