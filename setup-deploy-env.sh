@@ -7,6 +7,9 @@ export SA_KEY_PATH="$SCRIPT_DIR/ct-kpi-automation-d56fab25ab61.json"
 export PROJECT_ID="ct-kpi-automation"
 export REGION="us-central1"
 
+# Toggle this to "true" to skip Cloud Scheduler updates by default
+export SKIP_SCHEDULER="true"
+
 # 2. Configure gcloud CLI
 gcloud auth activate-service-account --key-file="$SA_KEY_PATH" --quiet
 gcloud config set project "$PROJECT_ID" --quiet

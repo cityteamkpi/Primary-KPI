@@ -25,7 +25,12 @@ gcloud functions deploy nightly-program-utilization-job \
     --no-allow-unauthenticated \
     --entry-point=run_my_script
 
-echo "✅ Deploment complete"
+echo "✅ Deployment complete"
+
+if [ "$SKIP_SCHEDULER" = "true" ]; then
+    echo "⏭️ Skipping Cloud Scheduler update as requested."
+    exit 0
+fi
 
 # Capture the function URL to use in the scheduler
 FUNCTION_URL=$(gcloud functions describe nightly-program-utilization-job --region="$REGION" --format='value(serviceConfig.uri)')
