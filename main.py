@@ -1,6 +1,4 @@
 # --- Standard Library Imports ---
-from datetime import datetime
-from zoneinfo import ZoneInfo
 import argparse
 import sys
 
@@ -15,8 +13,9 @@ import functions_framework
 input_folder = "Apricot Report Incoming"
 output_folder = "Quarterly KPI Processed Data"
 
+# ==========================================
 # File configuration is managed within specific processors
-
+# ==========================================
 
 
 # ==========================================
@@ -27,26 +26,12 @@ output_folder = "Quarterly KPI Processed Data"
 def run_my_script(request):
     """
     HTTP Cloud Function entry point.
-    Expects a JSON payload: 
-    {
-        "start_date": "YYYY-MM-DD", 
-        "end_date": "YYYY-MM-DD" 
-      }
     """
     # 1. Extract task: Check JSON body first, then fallback to URL query parameters
     request_json = request.get_json(silent=True) or {}
     task = request_json.get("task") or request.args.get("task", "all")
 
     print(f"Executing request - Task: {task}, Payload: {request_json}, QueryArgs: {dict(request.args)}")
-
-    # Default to current month if dates aren't provided
-    # Using America/Los_Angeles to ensure PST/PDT is handled correctly
-    today = datetime.now(ZoneInfo("America/Los_Angeles"))
-    default_start = today.replace(day=1).strftime('%Y-%m-%d')
-    default_end = today.strftime('%Y-%m-%d')
-    
-    start_date = request_json.get("start_date", default_start)
-    end_date = request_json.get("end_date", default_end)
 
     print(f"Starting task '{task}'")
 
@@ -66,17 +51,6 @@ def run_my_script(request):
             from alum_processor import run_alum_processing
             print("Running Alumni Processor...")
             msg = run_alum_processing(
-                input_folder_name=input_folder,
-                output_folder_name=output_folder
-            )
-            results.append(msg)
-
-        if task in ["alum-gd", "all"]:
-            from alum_processor import run_alum_processing
-            print("Running Alumni Processor...")
-            msg = run_alum_processing(
-                start_date=start_date,
-                end_date=end_date,
                 input_folder_name=input_folder,
                 output_folder_name=output_folder
             )
@@ -137,16 +111,9 @@ def run_my_script(request):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Local runner for KPI processors")
-    parser.add_argument("--start_date", help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end_date", help="End date (YYYY-MM-DD)")
     parser.add_argument("--task", choices=["renew", "alum", "util", "impact", "tp", "atwork", "all"], default="all", help="Task to run")
 
     args = parser.parse_args()
-
-    # Default dates if not provided (Local CLI execution)
-    today = datetime.now(ZoneInfo("America/Los_Angeles"))
-    cli_start = args.start_date or today.replace(day=1).strftime('%Y-%m-%d')
-    cli_end = args.end_date or today.strftime('%Y-%m-%d')
 
     try:
         if args.task in ["renew", "all"]:
@@ -157,23 +124,13 @@ if __name__ == "__main__":
                 output_folder_name=output_folder
             )
 
-        if args.task in ["alum"]:
+        if args.task in ["alum", "all"]:
             from alum_processor import run_alum_processing
             print(f"Running Alumni Processor ...")
             run_alum_processing(
                 input_folder_name=input_folder,
                 output_folder_name=output_folder
             )
-
-     #   if args.task in ["alum-gd"]:
-     #       from alum_processor import run_alum_processing
-     #       print(f"Running Alumni Processor for {cli_start} to {cli_end}...")
-     #       run_alum_processing(
-     #           start_date=cli_start,
-     #           end_date=cli_end,
-     #           input_folder_name=input_folder,
-     #           output_folder_name=output_folder
-     #       )
 
         if args.task in ["util", "all"]:
             from program_utilization_processor import run_utilization_processing
