@@ -1,0 +1,277 @@
+LEVEL: I
+NAME: kpi-automation-job
+EXECUTION_ID: 
+TIME_UTC: 2026-08-28 14:18:57.648
+LOG: Default STARTUP TCP probe succeeded after 1 attempt for container "worker" on port 8080.
+
+LEVEL: I
+NAME: kpi-automation-job
+EXECUTION_ID: 
+TIME_UTC: 2026-08-28 14:18:57.328
+LOG: Default STARTUP TCP probe succeeded after 1 attempt for container "worker" on port 8080.
+
+LEVEL: I
+NAME: kpi-automation-job
+EXECUTION_ID: 
+TIME_UTC: 2026-08-28 14:18:56.683
+LOG: Starting new instance. Reason: AUTOSCALING - Instance started due to configured scaling factors (e.g. CPU utilization, request throughput, etc.) or no existing capacity for current traffic.
+
+LEVEL: I
+NAME: kpi-automation-job
+EXECUTION_ID: 
+TIME_UTC: 2026-08-28 14:18:56.639
+LOG: Starting new instance. Reason: AUTOSCALING - Instance started due to configured scaling factors (e.g. CPU utilization, request throughput, etc.) or no existing capacity for current traffic.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:36.796
+LOG: 
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:36.795
+LOG:    Download Progress: 100%
+
+LEVEL: E
+NAME: kpi-automation-job
+EXECUTION_ID: 
+TIME_UTC: 2026-08-28 14:17:34.742
+LOG: 'Memory limit of 244 MiB exceeded with 258 MiB used. Consider increasing the memory limit, see https://cloud.google.com/functions/docs/configuring/memory'
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:34.018
+LOG: httplib2 transport does not support per-request timeout. Set the timeout when constructing the httplib2.Http instance.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:34.016
+LOG: httplib2 transport does not support per-request timeout. Set the timeout when constructing the httplib2.Http instance.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:34.005
+LOG:    LW/Housing window: 2025-03-01 – 2025-05-31
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:34.005
+LOG:    Sobriety window  : 2024-09-01 – 2024-11-30
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:34.005
+LOG: ✅ All dynamic constants loaded for FY26 Q4.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:34.004
+LOG: ✅ Next FY Goals loaded.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:30.502
+LOG: httplib2 transport does not support per-request timeout. Set the timeout when constructing the httplib2.Http instance.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:30.500
+LOG: httplib2 transport does not support per-request timeout. Set the timeout when constructing the httplib2.Http instance.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:30.405
+LOG: Running in Cloud: Using service identity default
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:30.397
+LOG: Running in Cloud: Using service identity default
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:30.391
+LOG: 🚀 Starting Alumni KPI Processing...
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:30.391
+LOG: Running Alumni Processor...
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:30.376
+LOG: 
+🎉 Done!: https://docs.google.com/spreadsheets/d/1lmmw_Ii0hLyi0UeDodnPzy44sC3F4YUIqM9iLTo1wHY
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:29.244
+LOG:    ✅ 'Retention' written (2372 rows)
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:27.354
+LOG:    ✅ 'Occupancy' written (2060 rows)
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:25.748
+LOG:    ✅ 'Renew Graduates' written (550 rows)
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:24.223
+LOG:    ✅ 'Raw Data' written (10539 rows)
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:21.637
+LOG: 📄 Opened existing: 'Renew Programs Report - Processed'
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:19.196
+LOG: Processing Retention...
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:18.701
+LOG: Processing Occupancy...
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:18.405
+LOG: Processing Graduates...
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:09.903
+LOG: 
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:09.903
+LOG:    Download Progress: 100%
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:08.469
+LOG: Downloading Renew Programs Report.xlsx...
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:06.917
+LOG: httplib2 transport does not support per-request timeout. Set the timeout when constructing the httplib2.Http instance.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:06.915
+LOG: httplib2 transport does not support per-request timeout. Set the timeout when constructing the httplib2.Http instance.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:06.905
+LOG: ✅ All dynamic constants loaded for FY26 Q4.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:06.904
+LOG: ✅ Next FY Goals loaded.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:00.801
+LOG: httplib2 transport does not support per-request timeout. Set the timeout when constructing the httplib2.Http instance.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:00.799
+LOG: httplib2 transport does not support per-request timeout. Set the timeout when constructing the httplib2.Http instance.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:00.700
+LOG: Running in Cloud: Using service identity default
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:00.605
+LOG: Running in Cloud: Using service identity default
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:00.515
+LOG: Running Renew Programs Processor...
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:17:00.515
+LOG: ✅ Static configuration loaded.
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:16:52.395
+LOG: Starting task 'all'
+
+LEVEL: 
+NAME: kpi-automation-job
+EXECUTION_ID: nvFAMOdIs1t1
+TIME_UTC: 2026-08-28 14:16:52.395
+LOG: Executing request - Task: all, Payload: {'task': 'all'}, QueryArgs: {}
+
+LEVEL: E
+NAME: kpi-automation-job
+EXECUTION_ID: 
+TIME_UTC: 2026-08-28 14:16:52.319
+LOG: The request failed because either the HTTP response was malformed or connection to the instance had an error. Additional troubleshooting documentation can be found at: https://cloud.google.com/run/docs/troubleshooting#malformed-response-or-connection-error
+While handling this request, the container instance was found to be using too much memory and was terminated. This is likely to cause a new container instance to be used for the next request to this revision. If you see this message frequently, you may have a memory leak in your code or may need more memory. Consider creating a new revision with more memory.
+
+LEVEL: I
+NAME: kpi-automation-job
+EXECUTION_ID: 
+TIME_UTC: 2026-08-28 14:14:51.475
+LOG: Default STARTUP TCP probe succeeded after 1 attempt for container "worker" on port 8080.
+
+LEVEL: I
+NAME: kpi-automation-job
+EXECUTION_ID: 
+TIME_UTC: 2026-08-28 14:14:50.517
+LOG: Starting new instance. Reason: DEPLOYMENT_ROLLOUT - Instance started due to traffic shifting between revisions due to deployment, traffic split adjustment, or deployment health check.
