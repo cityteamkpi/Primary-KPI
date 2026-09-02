@@ -138,6 +138,17 @@ def run_renew_processing(
         df["City"] = df[COL_PROGRAM].apply(constants.assign_city)
         df[constants.OCC_PRIOR_LABEL]   = df.apply(lambda r: was_active_on(r[COL_START_DATE], r[COL_EXIT_DATE], constants.OCC_PRIOR_DATE), axis=1)
         df[constants.OCC_CURRENT_LABEL] = df.apply(lambda r: was_active_on(r[COL_START_DATE], r[COL_EXIT_DATE], constants.OCC_CURRENT_DATE), axis=1)
+
+        # Number of Children — counts kids only for GV Renew
+        COL_CHILD = "Name of Child_6313"
+        def count_kids_only(row):
+            if row[COL_PROGRAM] != "GV Renew": return 0
+            val = row.get(COL_CHILD)
+            if pd.isna(val) or str(val).strip() == "": return 0
+            import re as _re
+            parts = _re.split(r'[,&]|\band\b', str(val).strip(), flags=_re.IGNORECASE)
+            return len([p for p in parts if p.strip()])
+        df["Number of Children"] = df.apply(count_kids_only, axis=1)
         df["Capacity"]           = df[COL_PROGRAM].map(constants.OCCUPANCY_CAPACITY)
         df["Goal"]               = df[COL_PROGRAM].map(constants.OCCUPANCY_GOAL)
         df["Next FY Goal"]       = df[COL_PROGRAM].map(constants.NEXT_FY_OCC_GOALS)
@@ -146,7 +157,7 @@ def run_renew_processing(
         # Explicit column selection
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE,
                 "City", constants.OCC_PRIOR_LABEL, constants.OCC_CURRENT_LABEL,
-                "Capacity", "Goal", "Next FY Goal", "Prior FY Occupancy"]
+                "Name of Child_6313", "Number of Children", "Capacity", "Goal", "Next FY Goal", "Prior FY Occupancy"]
         df = df[[c for c in cols if c in df.columns]].copy()
 
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)

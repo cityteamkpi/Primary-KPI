@@ -164,6 +164,20 @@ def run_turning_point_processing(
                         df.at[idx, constants.OCC_CURRENT_LABEL] = int(val)
                     except (ValueError, TypeError):
                         pass
+        # Number of Children — counts kids only for women's programs, no active filter
+        WOMEN_PROGRAMS = [
+            "Chester Women Turning Point", "Oakland Women Turning Point",
+            "GV Turning Point", "Heritage Home", "San Jose Youth Collective"
+        ]
+        def count_kids_only(row):
+            if row[COL_PROGRAM] not in WOMEN_PROGRAMS: return 0
+            val = row.get(COL_CHILD)
+            if pd.isna(val) or str(val).strip() == "": return 0
+            import re as _re
+            parts = _re.split(r'[,&]|\band\b', str(val).strip(), flags=_re.IGNORECASE)
+            return len([p for p in parts if p.strip()])
+        df["Number of Children"] = df.apply(count_kids_only, axis=1)
+
         # Ensure OCC_CURRENT_LABEL is always int
         df[constants.OCC_CURRENT_LABEL] = pd.to_numeric(df[constants.OCC_CURRENT_LABEL], errors="coerce").fillna(0).astype(int)
 
@@ -177,7 +191,7 @@ def run_turning_point_processing(
 
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE,
                 "City", constants.OCC_PRIOR_LABEL, constants.OCC_CURRENT_LABEL,
-                "Name of Child_6313", "Capacity", "Goal", "Next FY Goal", "Prior FY Occupancy"]
+                "Name of Child_6313", "Number of Children", "Capacity", "Goal", "Next FY Goal", "Prior FY Occupancy"]
         df = df[[c for c in cols if c in df.columns]].copy()
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
         df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
