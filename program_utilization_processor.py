@@ -6,22 +6,78 @@
 #       - with Renew, Men's TP and Women's TP tabs
 # =========================================================================
 
-
+import time
 import warnings
 import pandas as pd
 import gspread
 from zoneinfo import ZoneInfo
 from gspread_dataframe import get_as_dataframe, set_with_dataframe
 from datetime import datetime
+from googleapiclient.discovery import build as _build
 from auth_utils import get_services
 from drive_utils import download_drive_file, resolve_folder_id, find_file_id, load_raw, write_tab
-
 
 # Suppress openpyxl warnings regarding styles and validation metadata
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
-def run_utilization_processing(
+MENTOR_PROGRAMS = {
+    "Chester Renew", "GV Renew", "Oakland Renew", "Portland Renew", "San Jose Men Renew",
+    "Chester Men Turning Point", "Chester Women Turning Point",
+    "Oakland Men Turning Point", "Oakland Women Turning Point",
+    "Portland Men Turning Point",
+    "GV Turning Point", "Heritage Home",
+    "San Jose Men Turning Point", "San Jose Youth Collective",
+}
 
+PROGRAM_CATEGORY = {
+    # Renew
+    "Chester Renew": "Renew",
+    "GV Renew": "Renew",
+    "GV Renew Number of Children": "Renew",
+    "Oakland Renew": "Renew",
+    "Portland Renew": "Renew",
+    "San Jose Men Renew": "Renew",
+    # Men Turning Point
+    "Chester Men Turning Point": "Men Turning Point",
+    "Oakland Men Turning Point": "Men Turning Point",
+    "San Jose Men Turning Point": "Men Turning Point",
+    "Portland Men Turning Point": "Men Turning Point",
+    # Women Turning Point
+    "Chester Women Turning Point": "Women Turning Point",
+    "Chester Women Turning Point Number of Children": "Women Turning Point",
+    "GV Turning Point": "Women Turning Point",
+    "GV Turning Point Number of Children": "Women Turning Point",
+    "Heritage Home": "Women Turning Point",
+    "Heritage Home Number of Children": "Women Turning Point",
+    "Oakland Women Turning Point": "Women Turning Point",
+    "Oakland Women Turning Point Number of Children": "Women Turning Point",
+    "Portland Community of Hope": "Women Turning Point",
+    "Portland Community of Hope Number of Children": "Women Turning Point",
+    "San Jose Youth Collective": "Women Turning Point",
+    "San Jose Youth Collective Number of Children": "Women Turning Point",
+    # Forward
+    "Chester Forward": "Forward",
+    "GV Men's Forward": "Forward",
+    "GV Women's Forward": "Forward",
+    "GV Women's Forward Number of Children": "Forward",
+    "San Jose Women's House of Light": "Forward",
+    "San Jose Women's House of Light Number of Children": "Forward",
+    "Oakland Forwad Men": "Forward",
+    "Oakland Forward Women": "Forward",
+    "Oakland Forward Women Number of Children": "Forward",
+    "Portland Forward": "Forward",
+    # Other
+    "SJ WP Transition Phase": "Other",
+    "GV Immediate Temporary Housing": "Other",
+    # APH
+    "GV APH": "APH",
+    # Elevate
+    "Elevate Mayfair Level 1": "Elevate",
+    "Elevate Mt View Level 1": "Elevate",
+    "Elevate Redwood City Level 1": "Elevate",
+}
+
+def run_utilization_processing(
     input_report_file       = 'Clients in All Programs.xlsx',
     input_mentorship_file   = 'Mentorship.xlsx',
     input_utilization_file  = 'Clients in All Programs - Processed',
@@ -155,7 +211,6 @@ def run_utilization_processing(
                 insert_idx = cols_list.index(prog) + 1
                 df_sheet.insert(insert_idx, children_col, 0)
                 cols_list = list(df_sheet.columns)  # update after insert
-                cols_list = list(df_sheet.columns)
 
         # Update today's row
         for program in df_sheet.columns:
@@ -188,6 +243,17 @@ def run_utilization_processing(
             if COL_MENTOR_DT in df_m.columns:
                 df_m[COL_MENTOR_DT] = pd.to_datetime(df_m[COL_MENTOR_DT], errors="coerce")
 
+            # Filter: Acquired Spiritual Mentor = Yes
+            COL_MENTOR = "Acquired Spiritual Mentor_5136"
+            if COL_MENTOR in df_m.columns:
+                df_m = df_m[df_m[COL_MENTOR].astype(str).str.strip() == "Yes"]
+
+            # Filter: Exit Date is null (still in program)
+            COL_EXIT = "Exit Date_2100"
+            if COL_EXIT in df_m.columns:
+                df_m[COL_EXIT] = pd.to_datetime(df_m[COL_EXIT], errors="coerce")
+                df_m = df_m[df_m[COL_EXIT].isna()]
+
             # Filter: in program > 60 days
             if COL_START in df_m.columns:
                 today = pd.Timestamp.now()
@@ -213,7 +279,7 @@ def run_utilization_processing(
                 mentor_sheet = spreadsheet.worksheet("Mentorship")
                 mentor_df = pd.DataFrame(mentor_sheet.get_all_records())
                 if "Date" in mentor_df.columns:
-                    mentor_df["Date"] = pd.to_datetime(mentor_df["Date"], errors="coerce")
+                    mentor_df["Date"] = pd.to_datetime(mentor_df["Date"], errors="coerce", format="mixed")
                     mentor_df = mentor_df.set_index("Date")
                 else:
                     mentor_df = pd.DataFrame()
@@ -221,10 +287,14 @@ def run_utilization_processing(
                 mentor_df = pd.DataFrame()
 
             # Get program columns from tab header; fallback to unique programs in data
+            # Only include Renew + TP programs
             if not mentor_df.empty:
-                mentor_programs = [c for c in mentor_df.columns if c != "Total"]
+                mentor_programs = [c for c in mentor_df.columns if c != "Total" and c in MENTOR_PROGRAMS]
             else:
-                mentor_programs = sorted(df_m[COL_PROG].dropna().astype(str).str.strip().unique().tolist())
+                mentor_programs = sorted(MENTOR_PROGRAMS)
+
+            # Filter to Renew + TP programs only
+            df_m = df_m[df_m[COL_PROG].astype(str).str.strip().isin(MENTOR_PROGRAMS)]
 
             # Count clients per program
             mentor_counts = df_m[COL_PROG].astype(str).str.strip().value_counts()
@@ -238,7 +308,11 @@ def run_utilization_processing(
             if mentor_df.empty:
                 mentor_df = pd.DataFrame([new_row], index=pd.Index([today_str], name="Date"))
             else:
-                mentor_df.index = mentor_df.index.strftime('%-m/%-d/%y') if hasattr(mentor_df.index, 'strftime') else mentor_df.index
+                # Convert index to consistent string format
+                mentor_df.index = pd.to_datetime(mentor_df.index, errors="coerce", format="mixed")
+                mentor_df = mentor_df[mentor_df.index.notna()]
+                mentor_df.index = mentor_df.index.strftime('%-m/%-d/%y')
+                mentor_df.index.name = "Date"
                 mentor_df.loc[today_str] = new_row
 
             write_tab(spreadsheet, "Mentorship", mentor_df.reset_index())
@@ -252,9 +326,6 @@ def run_utilization_processing(
 
     # Run averages in same folder
     run_averages_processing(folder_id=output_folder_id)
-
-if __name__ == "__main__":
-    run_utilization_processing()
 
 
 def run_averages_processing(
@@ -294,57 +365,82 @@ def run_averages_processing(
         fy = get_fy(date)
         return f"FY{str(fy)[-2:]}"
 
-    def get_week_label(date):
+    def get_week_num(date):
         fy = get_fy(date)
-        fy_label = get_fy_label(date)
-        fy_start = pd.Timestamp(f"{fy-1}-09-01")
-        sep1_week_monday = fy_start - pd.Timedelta(days=fy_start.weekday())
-        delta = (date - sep1_week_monday).days
-        w = max(1, delta // 7 + 1)
-        return f"{fy_label} Week {w}"
+        fy_start = pd.Timestamp(f"{fy-1}-09-01")  # Always Sep 1
+        delta = (date - fy_start).days
+        return min(52, max(1, delta // 7 + 1))
+
+    def get_week_label(date):
+        return f"Week {get_week_num(date)}"
+
+    def get_fy_week_label(date):
+        return f"{get_fy_label(date)} Week {get_week_num(date)}"
 
     def get_month(date):
+        return date.strftime("%B")
+
+    def get_fy_month(date):
         return date.strftime("%B %Y")
 
     def get_quarter(date):
-        fy_label = get_fy_label(date)
         m = date.month
-        if m in [9, 10, 11]: q = "Q1"
-        elif m in [12, 1, 2]: q = "Q2"
-        elif m in [3, 4, 5]: q = "Q3"
-        else: q = "Q4"
-        return f"{fy_label} {q}"
+        if m in [9, 10, 11]: return "Q1"
+        elif m in [12, 1, 2]: return "Q2"
+        elif m in [3, 4, 5]: return "Q3"
+        else: return "Q4"
+
+    def get_fy_quarter(date):
+        return f"{get_fy_label(date)} {get_quarter(date)}"
 
     def read_tab(tab_name):
-        try:
-            ws = src_ss.worksheet(tab_name)
-            df = pd.DataFrame(ws.get_all_records())
-            if df.empty or "Date" not in df.columns:
-                return None
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-            df = df.dropna(subset=["Date"])
-            prog_cols = [c for c in df.columns if c != "Date" and not str(c).endswith("Number of Children") and str(c) != "Total"]
-            return df, prog_cols
-        except Exception as e:
-            print(f"⚠️  Could not read tab '{tab_name}': {e}")
-            return None
+        for attempt in range(3):
+            try:
+                time.sleep(5)
+                ws = src_ss.worksheet(tab_name)
+                df = pd.DataFrame(ws.get_all_records())
+                if df.empty or "Date" not in df.columns:
+                    return None
+                df["Date"] = pd.to_datetime(df["Date"], errors="coerce", format="mixed")
+                df = df.dropna(subset=["Date"])
+                prog_cols = [c for c in df.columns if c != "Date" and not str(c).endswith("Number of Children") and str(c) != "Total"]
+                # For Mentorship tab, filter to Renew + TP programs only
+                if tab_name == "Mentorship":
+                    prog_cols = [c for c in prog_cols if c in MENTOR_PROGRAMS]
+                return df, prog_cols
+            except Exception as e:
+                if "429" in str(e) and attempt < 2:
+                    print(f"   Rate limited on '{tab_name}', retrying in 30s...")
+                    time.sleep(30)
+                else:
+                    print(f"⚠️  Could not read tab '{tab_name}': {e}")
+                    return None
+        return None
 
-    def compute_averages(df, prog_cols, period_fn):
+    def compute_averages(df, prog_cols, period_fn, fy_period_fn=None):
         rows = []
         df = df.copy()
         df["_period"] = df["Date"].apply(period_fn)
+        df["_fy_period"] = df["Date"].apply(fy_period_fn) if fy_period_fn else df["Date"].apply(period_fn)
         df["_fy"] = df["Date"].apply(get_fy_label)
         for period, grp in df.groupby("_period", sort=False):
             fy = grp["_fy"].iloc[0]
+            fy_period = grp["_fy_period"].iloc[0]
             for prog in prog_cols:
                 if prog not in grp.columns: continue
                 vals = pd.to_numeric(grp[prog], errors="coerce").dropna()
                 avg = round(vals.mean(), 2) if not vals.empty else 0
-                rows.append({"FY": fy, "Period": period, "Program": prog, "Average": avg})
+                rows.append({"FY": fy, "Period": period, "FY Period": fy_period, "Category": PROGRAM_CATEGORY.get(prog, "Other"), "Program": prog, "Average": avg})
         return pd.DataFrame(rows)
 
     def write_averages(tab_name, df_avg, period_col_name):
-        df_out = df_avg.rename(columns={"Period": period_col_name})
+        df_out = df_avg.rename(columns={
+            "Period": period_col_name,
+            "FY Period": f"FY {period_col_name}"
+        })
+        # Ensure column order
+        cols = ["FY", period_col_name, f"FY {period_col_name}", "Category", "Program", "Average"]
+        df_out = df_out[[c for c in cols if c in df_out.columns]]
         try:
             ws = out_ss.worksheet(tab_name)
             existing = pd.DataFrame(ws.get_all_records())
@@ -372,22 +468,153 @@ def run_averages_processing(
 
     if all_occ_dfs:
         df_occ = pd.concat(all_occ_dfs, ignore_index=True).groupby("Date", as_index=False).sum(numeric_only=True)
-        write_averages("Occupancy Weekly Avg",    compute_averages(df_occ, occ_prog_cols, get_week_label), "Week")
-        write_averages("Occupancy Monthly Avg",   compute_averages(df_occ, occ_prog_cols, get_month), "Month")
-        write_averages("Occupancy Quarterly Avg", compute_averages(df_occ, occ_prog_cols, get_quarter), "Quarter")
+        write_averages("Occupancy Weekly Avg",    compute_averages(df_occ, occ_prog_cols, get_week_label, get_fy_week_label), "Week")
+        write_averages("Occupancy Monthly Avg",   compute_averages(df_occ, occ_prog_cols, get_month, get_fy_month), "Month")
+        write_averages("Occupancy Quarterly Avg", compute_averages(df_occ, occ_prog_cols, get_quarter, get_fy_quarter), "Quarter")
 
     # Process Mentorship tab
     result = read_tab("Mentorship")
     if result:
         df_m, mentor_progs = result
-        write_averages("Mentorship Weekly Avg",    compute_averages(df_m, mentor_progs, get_week_label), "Week")
-        write_averages("Mentorship Monthly Avg",   compute_averages(df_m, mentor_progs, get_month), "Month")
-        write_averages("Mentorship Quarterly Avg", compute_averages(df_m, mentor_progs, get_quarter), "Quarter")
+        write_averages("Mentorship Weekly Avg",    compute_averages(df_m, mentor_progs, get_week_label, get_fy_week_label), "Week")
+        write_averages("Mentorship Monthly Avg",   compute_averages(df_m, mentor_progs, get_month, get_fy_month), "Month")
+        write_averages("Mentorship Quarterly Avg", compute_averages(df_m, mentor_progs, get_quarter, get_fy_quarter), "Quarter")
+
+    # =========================================================================
+    # Fetch FY27 Goals & Extra Cells from Constants Update Sheet
+    # =========================================================================
+    PROGRAM_GOAL_CELLS = {
+        "Chester Renew": "D7",
+        "GV Renew": "D11",
+        "Oakland Renew": "D15",
+        "Portland Renew": "D19",
+        "San Jose Men Renew": "D23",
+        "Chester Men Turning Point": "I11",
+        "Oakland Men Turning Point": "I15",
+        "San Jose Men Turning Point": "I39",
+        "Portland Men Turning Point": "I27",
+        "Chester Women Turning Point": "I11",
+        "GV Turning Point": "I31",
+        "Heritage Home": "I35",
+        "Oakland Women Turning Point": "I19",
+        "Portland Community of Hope": "I23",
+        "San Jose Youth Collective": "I43",
+    }
+
+    program_goals = {}
+    gv_tp_extra_count = 0  # To store cell P30 value from Sheet1
+
+    try:
+        _, _, _creds = get_services()
+        _sheets = _build("sheets", "v4", credentials=_creds)
+        _folder = resolve_folder_id(drive_service, "CityTeam KPIs", "Constants")
+        _cf = find_file_id(drive_service, "Constants Update", _folder)
+
+        if _cf:
+            # Batch fetch goal ranges from FY27 Goals + cell P30 from Sheet1
+            ranges = [f"'FY27 Goals'!{cell}" for cell in PROGRAM_GOAL_CELLS.values()]
+            ranges.append("'Sheet1'!P30")
+
+            batch_resp = _sheets.spreadsheets().values().batchGet(
+                spreadsheetId=_cf["id"], ranges=ranges
+            ).execute()
+
+            # Map cell values to programs and extract P30
+            value_ranges = batch_resp.get("valueRanges", [])
+            cell_val_map = {}
+            for vr in value_ranges:
+                full_range = vr.get("range", "")
+                cell_name = full_range.split("!")[-1].replace("$", "")
+                vals = vr.get("values", [[""]])
+                val_str = str(vals[0][0]).replace(",", "").strip() if vals and vals[0] else None
+                
+                try:
+                    num_val = int(float(val_str)) if val_str not in [None, ""] else 0
+                except ValueError:
+                    num_val = 0
+
+                if "Sheet1" in full_range and cell_name == "P30":
+                    gv_tp_extra_count = num_val
+                else:
+                    cell_val_map[cell_name] = num_val
+
+            # Assign retrieved values back to program key
+            for prog, cell_ref in PROGRAM_GOAL_CELLS.items():
+                program_goals[prog] = cell_val_map.get(cell_ref, 0)
+
+            print(f"✅ Loaded FY27 goals and Sheet1!P30 extra count ({gv_tp_extra_count}) from Constants Update")
+
+    except Exception as e:
+        print(f"⚠️  Could not load Constants Update data: {e}")
+
+    # =========================================================================
+    # Latest Occupancy tab — most recent row from each occupancy tab
+    # =========================================================================
+    latest_occ_rows = []
+    for tab_name in occ_tabs:
+        result = read_tab(tab_name)
+        if result:
+            df_tab, prog_cols = result
+            if df_tab.empty: continue
+            latest_date = df_tab["Date"].max()
+            latest_row = df_tab[df_tab["Date"] == latest_date].iloc[0]
+            for prog in prog_cols:
+                if prog in latest_row:
+                    latest_occ_rows.append({
+                        "Date": latest_date.strftime("%-m/%-d/%y"), 
+                        "Program": prog, 
+                        "Count": pd.to_numeric(latest_row[prog], errors="coerce")
+                    })
+
+    if latest_occ_rows:
+        df_latest_occ = pd.DataFrame(latest_occ_rows)
+        df_latest_occ["Count"] = df_latest_occ["Count"].fillna(0)
+
+        # Add Sheet1!P30 extra count to GV Turning Point
+        gv_mask = df_latest_occ["Program"] == "GV Turning Point"
+        if gv_mask.any():
+            df_latest_occ.loc[gv_mask, "Count"] += gv_tp_extra_count
+
+        df_latest_occ["Category"] = df_latest_occ["Program"].map(PROGRAM_CATEGORY).fillna("Other")
+        
+        # Map Next FY Goal using program name lookup
+        df_latest_occ["Next FY Goal"] = df_latest_occ["Program"].map(program_goals).fillna(0).astype(int)
+
+        # Include Next FY Goal in column ordering
+        df_latest_occ = df_latest_occ[["Date", "Category", "Program", "Count", "Next FY Goal"]]
+
+        write_tab(out_ss, "Latest Occupancy", df_latest_occ)
+        print("✅ Latest Occupancy tab written with updated GV Turning Point Count and Next FY Goal column")
+
+    # =========================================================================
+    # Latest Mentorship tab — most recent row from Mentorship tab
+    # =========================================================================
+    result = read_tab("Mentorship")
+    if result:
+        df_m2, mentor_progs2 = result
+        if not df_m2.empty:
+            latest_date = df_m2["Date"].max()
+            latest_row = df_m2[df_m2["Date"] == latest_date].iloc[0]
+            latest_m_rows = []
+            for prog in mentor_progs2:
+                if prog in latest_row:
+                    latest_m_rows.append({"Date": latest_date.strftime("%-m/%-d/%y"), "Program": prog, "Count": pd.to_numeric(latest_row[prog], errors="coerce")})
+            if latest_m_rows:
+                df_latest_m = pd.DataFrame(latest_m_rows)
+                df_latest_m["Category"] = df_latest_m["Program"].map(PROGRAM_CATEGORY).fillna("Other")
+                df_latest_m = df_latest_m[["Date", "Category", "Program", "Count"]]
+                write_tab(out_ss, "Latest Mentorship", df_latest_m)
+                print("✅ Latest Mentorship tab written")
 
     # Cleanup Sheet1
     try:
         out_ss.del_worksheet(out_ss.worksheet("Sheet1"))
-    except:
+    except Exception:
         pass
 
     print(f"✅ Averages done: {out_ss.url}")
+
+
+if __name__ == "__main__":
+    print("🚀 Starting Program Utilization Processing"),
+    run_utilization_processing()

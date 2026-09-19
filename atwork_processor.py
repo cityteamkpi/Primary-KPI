@@ -122,7 +122,9 @@ def run_atwork_processing(
             (df[COL_DATE] <= constants.CURRENT_Q_END)
         ]
         df = df.sort_values(COL_DATE, ascending=False).drop_duplicates(subset=[COL_ID], keep="first")
-        df = df[df[COL_PROG].isin(VALID_PROGRAMS_ALL)].reset_index(drop=True)
+        df = df[df[COL_PROG].isin(VALID_PROGRAMS_NUM_DEN)].reset_index(drop=True)
+        if COL_ASSESS in df.columns:
+            df = df[df[COL_ASSESS].astype(str).str.strip() == "Yes"].reset_index(drop=True)
         return df
 
     def process_barriers_numerator(df_raw):
@@ -283,6 +285,7 @@ def run_atwork_processing(
 
 if __name__ == "__main__":
     run_atwork_processing(
+        print("🚀 Starting @ Work Processing"),
         input_folder_name="Apricot Report Incoming",
         output_folder_name="KPI Processed Data"
     )

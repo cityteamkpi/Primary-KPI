@@ -14,6 +14,7 @@ import constants
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 def run_turning_point_processing(
+    print("🚀 Starting Turning Point Processing"),
     input_file="Turning Point Report.xlsx",
     output_file="Turning Point Report - Processed",
     input_folder_name=None,
@@ -143,27 +144,6 @@ def run_turning_point_processing(
 
 
 
-        # GV Turning Point exception: count children from Name of Child_6313
-        # If Name of Child is not null → use child count
-        # If Name of Child is null → keep was_active_on result (1 or 0)
-        def count_children(val):
-            if pd.isna(val) or str(val).strip() == "": return None  # None = fall back to was_active_on
-            text = str(val).strip()
-            import re
-            parts = re.split(r'[,&]|\band\b', text, flags=re.IGNORECASE)
-            return len([p for p in parts if p.strip()]) + 1  # +1 for the client
-
-        if COL_CHILD in df.columns:
-            is_gv_tp = df[COL_PROGRAM] == "GV Turning Point"
-            is_active = df[constants.OCC_CURRENT_LABEL] == 1
-            mask = is_gv_tp & is_active
-            child_counts = df.loc[mask, COL_CHILD].apply(count_children)
-            for idx, val in child_counts.items():
-                if pd.notna(val) and val is not None:
-                    try:
-                        df.at[idx, constants.OCC_CURRENT_LABEL] = int(val)
-                    except (ValueError, TypeError):
-                        pass
         # Number of Children — counts kids only for women's programs, no active filter
         WOMEN_PROGRAMS = [
             "Chester Women Turning Point", "Oakland Women Turning Point",
