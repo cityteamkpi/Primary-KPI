@@ -14,13 +14,13 @@ import constants
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 def run_turning_point_processing(
-    print("🚀 Starting Turning Point Processing"),
     input_file="Turning Point Report.xlsx",
     output_file="Turning Point Report - Processed",
     input_folder_name=None,
     output_folder_name=None
 ):
     # =========================================================================
+    print("🚀 Starting Turning Point Processing")
     # Spreadsheet-Specific Constants
     # =========================================================================
     RAW_DATA_HEADER_ROW = 3

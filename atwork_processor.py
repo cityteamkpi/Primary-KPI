@@ -284,8 +284,8 @@ def run_atwork_processing(
 
 
 if __name__ == "__main__":
+    print("🚀 Starting @ Work Processing")
     run_atwork_processing(
-        print("🚀 Starting @ Work Processing"),
         input_folder_name="Apricot Report Incoming",
         output_folder_name="KPI Processed Data"
     )

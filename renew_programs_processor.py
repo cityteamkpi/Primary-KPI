@@ -298,8 +298,8 @@ def run_renew_processing(
 
 
 if __name__ == "__main__":
+    print("🚀 Starting Renew Processing")
     run_renew_processing(
-        print("🚀 Starting Renew Processing"),
         input_folder_name="Apricot Report Incoming",
         output_folder_name="KPI Processed Data"
     )

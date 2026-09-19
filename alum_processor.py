@@ -245,7 +245,6 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
     }
 
 def run_alum_processing(
-    print("🚀 Starting Alumni KPI Processing"),
     input_file=SRC_ALUMNI + ".xlsx",
     output_file=OUTPUT_SHEET_NAME,
     input_folder_name=None,
