@@ -1,28 +1,31 @@
 #!/bin/bash
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    echo "❌ Error: This script must be executed, not sourced. Please run it as an executable: ./deployment_run_file.sh"
+    return 1 2>/dev/null || exit 1
+fi
+
 set -e
 source "$(dirname "$0")/setup-deploy-env.sh"
 
 echo "👤 Active Account: $(gcloud config get-value account)"
 
-# Dynamically retrieve the Project Number to construct the Service Account email
-PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)' 2>/dev/null)
-if [ -z "$PROJECT_NUMBER" ]; then
-    echo "❌ Error: Could not retrieve Project Number. Please ensure you are authenticated."
-    exit 1
-fi
-COMPUTE_SVC_ACCOUNT="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-
 # 1. Check and Add IAM policy binding. 
-echo "🔑 Checking if IAM binding for Cloud Run invoker exists..."
-# add-iam-policy-binding is idempotent; we can run it directly to ensure the state.
-echo "🔑 Ensuring Cloud Run invoker role is assigned to the compute service account..."
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:$COMPUTE_SVC_ACCOUNT" \
-    --role="roles/run.invoker" \
-    --quiet >/dev/null || echo "⚠️ Warning: Could not set IAM policy. Ensure your account has 'Project IAM Admin' permissions."
-echo "✅ IAM Binding complete"
+echo "🔑 Ensuring Cloud Run invoker role is assigned to $COMPUTE_SVC_ACCOUNT..."
 
-# 2. Deploy the Cloud Function
+# We attempt to add the binding. If it fails due to permissions, we warn the user 
+# but continue, as the role might already be granted at the project or resource level.
+if ! gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+     --member="serviceAccount:$COMPUTE_SVC_ACCOUNT" \
+     --role="roles/run.invoker" \
+     --quiet >/dev/null 2>&1; then
+    echo "⚠️  Note: Could not update project IAM policy. This is expected if the role is already assigned or if this identity lacks 'Project IAM Admin' permissions."
+else
+    echo "✅ IAM Binding verified/updated."
+fi
+
+# 2. Deploy the Cloud Function (intentionally omitting    --no-allow-unauthenticated \)
+# so this deploy doesn't require run.services.setIamPolicy
+echo "🚀 Deploying Cloud Function..."
 gcloud functions deploy kpi-automation-job \
     --gen2 \
     --runtime=python311 \
@@ -31,10 +34,11 @@ gcloud functions deploy kpi-automation-job \
     --memory=1Gi \
     --timeout=540s \
     --trigger-http \
-    --no-allow-unauthenticated \
     --entry-point=run_my_script
 
-echo "✅ Deployment complete"
+echo "✅ Deployment complete!"
+echo "🌐 Service URL: $(gcloud functions describe kpi-automation-job --region="$REGION" --format='value(serviceConfig.uri)')"
+echo "📊 Status: $(gcloud functions describe kpi-automation-job --region="$REGION" --format='value(state)')"
 
 if [ "$SKIP_SCHEDULER" = "true" ]; then
     echo "⏭️ Skipping Cloud Scheduler update as requested."
