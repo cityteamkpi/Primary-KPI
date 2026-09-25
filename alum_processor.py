@@ -2,6 +2,7 @@ import warnings
 import os
 import time
 import math
+import datetime
 import pandas as pd
 import numpy as np
 import gspread
@@ -65,7 +66,7 @@ INTERNS = {
     "Erik Grier",
     "Jueun Gu",
     "JASON Herr",
-    "Dennis Hester Jr.",
+    "Dennis Hester",
     "Christopher Hill",
     "Linden Hyman Jr.",
     "Robert Ivens",
@@ -100,54 +101,68 @@ def max_nonzero(series):
     vals = series.replace(0, np.nan).dropna()
     return vals.max() if not vals.empty else 0.0
 
+def get_grad_wage(group):
+    """Prioritizes graduation checkin rows where How Checked is 'Graduation' strictly.
+    Returns the wage on that row (even if $0.00). Fallback to max_nonzero only if
+    no 'Graduation' checkin row exists at all.
+    """
+    if COL_HOW_CHECKED in group.columns:
+        grad_checked = group[group[COL_HOW_CHECKED] == "Graduation"]
+        if not grad_checked.empty:
+            return float(grad_checked[COL_WAGE].iloc[0])
+    
+    # Fallback if no explicit 'Graduation' check-in row exists
+    return max_nonzero(group[COL_WAGE])
+
 def write_tab(spreadsheet, tab_name, df):
     """Writes DataFrame to Google Sheets replacing all non-compliant JSON values
-
-    (NaN, NaT, Inf, Timestamps) with standard Python strings or None.
+    (NaN, NaT, Inf, Timestamps, Python datetimes) with standard Python strings or None.
     """
+    needed_rows = max(len(df) + 1, 1)
+    needed_cols = max(len(df.columns), 1)
+
     try:
         worksheet = spreadsheet.worksheet(tab_name)
+        if worksheet.row_count < needed_rows or worksheet.col_count < needed_cols:
+            worksheet.resize(rows=max(needed_rows, worksheet.row_count),
+                              cols=max(needed_cols, worksheet.col_count))
         worksheet.clear()
     except gspread.exceptions.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=tab_name, rows=100, cols=20)
+        worksheet = spreadsheet.add_worksheet(title=tab_name, rows=needed_rows, cols=needed_cols)
 
     if df.empty:
         worksheet.update([df.columns.tolist()])
         return
 
-    # Convert DataFrame records to pure Python dictionaries to break Pandas object references
-    records = df.to_dict(orient="records")
+    df_clean = df.fillna("")
+    records = df_clean.to_dict(orient="records")
     clean_rows = []
 
     for row in records:
         clean_row = []
         for val in row.values():
-            # Check for Pandas/Numpy Nulls, NaNs, and Infs
             if pd.isna(val) or (isinstance(val, float) and (math.isnan(val) or math.isinf(val))):
-                clean_row.append(None)
-            # Check for Datetime / Timestamp objects
-            elif isinstance(val, (pd.Timestamp, pd.DatetimeIndex)):
+                clean_row.append("")
+            elif isinstance(val, (pd.Timestamp, pd.DatetimeIndex, datetime.datetime, datetime.date)):
                 clean_row.append(str(val)[:10])
-            # Check for str "nan" / "nat"
             elif isinstance(val, str) and val.lower() in ("nan", "nat", "inf", "-inf"):
-                clean_row.append(None)
+                clean_row.append("")
             else:
                 clean_row.append(val)
         clean_rows.append(clean_row)
 
-    values = [df.columns.tolist()] + clean_rows
+    headers = [str(c) if c is not None else "" for c in df.columns.tolist()]
+    values = [headers] + clean_rows
     worksheet.update(values)
 
 def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
     lw_target = constants.LW_CRITERIA.get(program, 0.0) or 0.0
     
-    # Restrict checkin history strictly to this client and program term
     person_records = df_raw_parsed[
         (df_raw_parsed[COL_NAME] == name) &
         (df_raw_parsed[COL_PROGRAM] == program)
     ].sort_values(by=COL_CHECKIN)
 
-    # Filter out checkins that belong to a subsequent re-enrollment term
     if COL_START_DATE in person_records.columns:
         person_records = person_records[
             (person_records[COL_START_DATE].isna()) |
@@ -192,37 +207,50 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
         (df_merged[COL_EXIT_DATE] == grad_date)
     ]
 
-    grad_wage = float(merged_row[COL_WAGE].apply(clean_wage).replace(0, float("nan")).max()) if not merged_row.empty else 0.0
-    grad_wage = 0.0 if pd.isna(grad_wage) else grad_wage
+    _grad_wage_val = merged_row[COL_WAGE].iloc[0] if not merged_row.empty else 0.0
+    grad_wage = float(_grad_wage_val) if pd.notna(_grad_wage_val) else 0.0
 
     _recent_wage_val = merged_row["recent_wage"].iloc[0] if not merged_row.empty and "recent_wage" in merged_row.columns else None
     recent_wage = float(_recent_wage_val) if _recent_wage_val is not None and pd.notna(_recent_wage_val) else grad_wage
     _recent_checkin_val = merged_row["recent_checkin"].iloc[0] if not merged_row.empty and "recent_checkin" in merged_row.columns else None
     recent_checkin = _recent_checkin_val if _recent_checkin_val is not None and pd.notna(_recent_checkin_val) else pd.NaT
 
+    wage_recent_out = recent_wage if is_sober else None
+
+    # Housing Expense & Income calculations
+    grad_housing = float(merged_row[COL_HOUSING].iloc[0]) if not merged_row.empty and COL_HOUSING in merged_row.columns and pd.notna(merged_row[COL_HOUSING].iloc[0]) else 0.0
+    grad_income = grad_wage * MONTHLY_HOURS
+
     grad_under_30 = None
     recent_under_30 = None
+    recent_housing = grad_housing
+    recent_income = 0.0
+
+    # Helper function for housing affordability calculation (<= 30%)
+    def is_under_30(housing, income):
+        if housing == 0:
+            return 1
+        if income > 0:
+            return 1 if (housing / income) <= 0.30 else 0
+        return 0  # Income is 0 but Housing > 0
+
     if not merged_row.empty:
-        grad_housing = float(merged_row[COL_HOUSING].apply(clean_wage).replace(0, float("nan")).max()) if COL_HOUSING in merged_row.columns else 0.0
-        grad_housing = 0.0 if pd.isna(grad_housing) else grad_housing
-        grad_income = grad_wage * MONTHLY_HOURS
-        grad_under_30 = 1 if (grad_housing == 0) else (1 if (grad_income > 0 and (grad_housing / grad_income) < 0.30) else 0)
+        grad_under_30 = is_under_30(grad_housing, grad_income)
 
         _recent_housing_val = merged_row["recent_housing"].iloc[0] if "recent_housing" in merged_row.columns else None
-        recent_housing = float(_recent_housing_val) if _recent_housing_val is not None and pd.notna(_recent_housing_val) and float(_recent_housing_val) > 0 else grad_housing
-        recent_income = recent_wage * MONTHLY_HOURS
-        recent_under_30 = 1 if (recent_housing == 0) else (1 if (recent_income > 0 and (recent_housing / recent_income) < 0.30) else 0)
+        recent_housing = float(_recent_housing_val) if _recent_housing_val is not None and pd.notna(_recent_housing_val) else grad_housing
+        
+        effective_recent_wage = wage_recent_out if wage_recent_out is not None else 0.0
+        recent_income = effective_recent_wage * MONTHLY_HOURS
+        recent_under_30 = is_under_30(recent_housing, recent_income)
     
     # --- Living Wage Evaluators ---
     pays_lw_grad = int(grad_wage >= lw_target) if lw_target else 0
 
-    # Non-sober graduates explicitly marked with "Not sober"
     if is_sober:
         pays_lw_recent = int(recent_wage >= lw_target) if lw_target else 0
-        wage_recent_out = recent_wage
     else:
         pays_lw_recent = "Not sober"
-        wage_recent_out = None
 
     return {
         COL_NAME: name,
@@ -240,6 +268,10 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
         "Pays LW? (Grad)": pays_lw_grad,
         "Wage (Recent)": wage_recent_out,
         "Pays LW? (Recent)": pays_lw_recent,
+        "Monthly Income (Grad)": grad_income,
+        "Monthly Income (Recent)": recent_income if is_sober else None,
+        "Housing Expense (Grad)": grad_housing,
+        "Housing Expense (Recent)": recent_housing,
         "Housing Under 30% (Grad)": 0 if grad_under_30 is None else int(grad_under_30),
         "Housing Under 30% (Recent)": 0 if recent_under_30 is None else int(recent_under_30),
     }
@@ -265,7 +297,12 @@ def run_alum_processing(
     output_folder_id = resolve_folder_id(drive_service, output_folder_name, "Output")
 
     fh_alumni, _, _ = download_drive_file(drive_service, input_file, input_folder_id)
-    df_raw = load_raw(fh_alumni, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
+
+    # --- RAW DATA & PARSED DATA ALIGNMENT ---
+    fh_alumni.seek(0)
+    df_raw_complete = load_raw(fh_alumni, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
+
+    df_raw = df_raw_complete.copy()
 
     # 2. Parsing & Dropping Invalid Client Names
     df_raw_parsed = df_raw.dropna(subset=[COL_NAME]).copy()
@@ -306,27 +343,35 @@ def run_alum_processing(
         .reset_index(drop=True)
     )
 
-    # Calculate max wage/housing for graduation records
+    # Calculate prioritized wage & housing for graduation records
     _grad_rows = df_raw_parsed[
         df_raw_parsed[COL_EXIT_REASON].isin(GRAD_REASONS) &
         df_raw_parsed[COL_EXIT_DATE].notna()
     ].copy()
+    _grad_rows[COL_EXIT_DATE] = pd.to_datetime(_grad_rows[COL_EXIT_DATE]).dt.normalize()
 
-    df_merged = _grad_rows.groupby([COL_NAME, COL_PROGRAM, COL_EXIT_DATE], sort=False).agg(
-        **{COL_WAGE: (COL_WAGE, max_nonzero),
-           COL_HOUSING: (COL_HOUSING, max_nonzero) if COL_HOUSING in _grad_rows.columns else (COL_WAGE, "first")}
-    ).reset_index()
+    def agg_grad_group(g):
+        w_val = get_grad_wage(g)
+        h_val = max_nonzero(g[COL_HOUSING]) if COL_HOUSING in g.columns else 0.0
+        return pd.Series({COL_WAGE: w_val, COL_HOUSING: h_val})
+
+    df_merged = (
+        _grad_rows
+        .groupby([COL_NAME, COL_PROGRAM, COL_EXIT_DATE], sort=False)
+        .apply(agg_grad_group)
+        .reset_index()
+    )
 
     # Post-grad checkin processing
     _all = df_raw_parsed.copy()
     _grad_dates = df_grads[[COL_NAME, COL_PROGRAM, COL_EXIT_DATE]].rename(columns={COL_EXIT_DATE: "grad_date"})
+    _grad_dates["grad_date"] = pd.to_datetime(_grad_dates["grad_date"]).dt.normalize()
     _all_with_grad = _all.merge(_grad_dates, on=[COL_NAME, COL_PROGRAM], how="inner")
     _post = _all_with_grad[
         _all_with_grad[COL_CHECKIN].notna() &
         (_all_with_grad[COL_CHECKIN] > _all_with_grad["grad_date"])
     ].copy()
 
-    # Filter out post checkins that occurred after a subsequent enrollment start date
     if COL_START_DATE in _post.columns:
         _post = _post[
             (_post[COL_START_DATE].isna()) | 
@@ -337,9 +382,11 @@ def run_alum_processing(
     if not _post.empty:
         _latest = _post.groupby([COL_NAME, COL_PROGRAM, "grad_date"])[COL_CHECKIN].transform("max")
         _post_latest = _post[_post[COL_CHECKIN] == _latest].copy()
+        
+        # Grab wage and housing strictly from the latest checkin date row(s)
         df_recent = _post_latest.groupby([COL_NAME, COL_PROGRAM, "grad_date"], sort=False).agg(
             recent_wage=(COL_WAGE, max_nonzero),
-            recent_housing=(COL_HOUSING, max_nonzero) if COL_HOUSING in _post_latest.columns else (COL_WAGE, max_nonzero),
+            recent_housing=(COL_HOUSING, "max"),  # Max as tie-breaker if multiple rows on latest date
             recent_checkin=(COL_CHECKIN, "max")
         ).reset_index().rename(columns={"grad_date": COL_EXIT_DATE})
     else:
@@ -360,7 +407,6 @@ def run_alum_processing(
     else:
         results_df["Latest Program"] = None
 
-    # Filter down to Target Fiscal Year
     fy_filtered_df = results_df[results_df["Year"] == target_fy_str].copy() if not results_df.empty else pd.DataFrame()
 
     # --- Sobriety Tab ---
@@ -377,7 +423,7 @@ def run_alum_processing(
             "City", "Year", "Quarter", "Year Q", "Sustained Relapse?", "Sobriety 1 Year"
         ])
 
-    # --- Living Wage Tab: ALL Target FY Graduates ---
+    # --- Living Wage Tab ---
     df_base_lw = fy_filtered_df.copy() if not fy_filtered_df.empty else pd.DataFrame()
     if not df_base_lw.empty:
         df_lw = df_base_lw[[
@@ -392,7 +438,7 @@ def run_alum_processing(
             "Wage (Recent)", "Pays LW? (Recent)"
         ])
 
-    # --- Housing Tab: Sober Renew Graduates excluding ONLY hardcoded INTERNS list ---
+    # --- Housing Tab ---
     if not fy_filtered_df.empty:
         df_base_housing = fy_filtered_df[
             (fy_filtered_df["is_sober"] == True) &
@@ -404,12 +450,18 @@ def run_alum_processing(
     if not df_base_housing.empty:
         df_housing = df_base_housing[[
             COL_NAME, COL_PROGRAM, "Graduation Date", "Most Recent Checkin", "City",
-            "Year", "Quarter", "Year Q", "Housing Under 30% (Grad)", "Housing Under 30% (Recent)"
+            "Year", "Quarter", "Year Q", "Wage (Grad)", "Wage (Recent)", 
+            "Monthly Income (Grad)", "Monthly Income (Recent)",
+            "Housing Expense (Grad)", "Housing Expense (Recent)",
+            "Housing Under 30% (Grad)", "Housing Under 30% (Recent)"
         ]].copy()
     else:
         df_housing = pd.DataFrame(columns=[
             COL_NAME, COL_PROGRAM, "Graduation Date", "Most Recent Checkin", "City",
-            "Year", "Quarter", "Year Q", "Housing Under 30% (Grad)", "Housing Under 30% (Recent)"
+            "Year", "Quarter", "Year Q", "Wage (Grad)", "Wage (Recent)", 
+            "Monthly Income (Grad)", "Monthly Income (Recent)",
+            "Housing Expense (Grad)", "Housing Expense (Recent)",
+            "Housing Under 30% (Grad)", "Housing Under 30% (Recent)"
         ])
 
     # --- Detailed Analysis ---
@@ -427,8 +479,8 @@ def run_alum_processing(
 
     print(f"Writing tabs to {ss.url}...")
 
-    # Write processed DataFrames to Sheets
-    write_tab(ss, "Raw Data", df_raw)
+    # Write DataFrames to Sheets
+    write_tab(ss, "Raw Data", df_raw_complete)
     write_tab(ss, "Sobriety", df_sobriety)
     write_tab(ss, "Living Wage", df_lw)
     write_tab(ss, "Housing", df_housing)
@@ -436,7 +488,7 @@ def run_alum_processing(
 
     try:
         ss.del_worksheet(ss.worksheet("Sheet1"))
-    except:
+    except Exception:
         pass
 
     drive_service.files().update(

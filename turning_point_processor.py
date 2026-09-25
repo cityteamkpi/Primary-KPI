@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-This script processes the Turning Point Report
+This script processes the Turning Point Report and outputs key KPI tabs.
 """
 
 import warnings
@@ -41,9 +41,6 @@ def run_turning_point_processing(
         "Portland Youth Collective", "San Jose Youth Collective", "Chester Turning Point",
     ]
 
-    GRAD_REASONS      = constants.GRAD_REASONS
-    COMPLETER_REASONS = ["Completer", "Completion of Program"]
-
     # =========================================================================
     # 1. Initialize Services
     # =========================================================================
@@ -71,7 +68,7 @@ def run_turning_point_processing(
     df_base[COL_START_DATE] = pd.to_datetime(df_base[COL_START_DATE], errors="coerce")
     df_base[COL_EXIT_DATE]  = pd.to_datetime(df_base[COL_EXIT_DATE],  errors="coerce")
 
-    # Remap Program Graduate Interns to their Intern Program
+    # Remap Program Graduate Interns to their specific Intern Program
     if COL_INTERN_PROGRAM in df_base.columns:
         is_intern = df_base[COL_PROGRAM] == "Program Graduate Intern"
         df_base.loc[is_intern, COL_PROGRAM] = df_base.loc[is_intern, COL_INTERN_PROGRAM].apply(match_program)
@@ -96,16 +93,15 @@ def run_turning_point_processing(
             mask &= df[COL_EXIT_REASON].isin(reasons_list)
         df = df[mask].copy()
 
-        df["City"]        = df[COL_PROGRAM].apply(constants.assign_city)
-        df["Year"]        = df[COL_EXIT_DATE].apply(constants.get_fiscal_year)
-        df["Quarter"]     = df[COL_EXIT_DATE].apply(constants.get_fiscal_quarter)
-        df["Year Q"]      = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
+        df["City"]         = df[COL_PROGRAM].apply(constants.assign_city)
+        df["Year"]         = df[COL_EXIT_DATE].apply(constants.get_fiscal_year)
+        df["Quarter"]      = df[COL_EXIT_DATE].apply(constants.get_fiscal_quarter)
+        df["Year Q"]       = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
         df["Next FY Goal"] = df[COL_PROGRAM].map(constants.NEXT_FY_GRAD_GOALS_TP)
 
         for k, (w_start, w_end) in constants.ACTUALS_WINDOWS.items():
             df[k] = (df[COL_EXIT_DATE].notna() & (df[COL_EXIT_DATE] >= w_start) & (df[COL_EXIT_DATE] <= w_end)).astype(int)
 
-        # Explicit column selection
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
                 "City", "Year", "Quarter", "Year Q", "Next FY Goal"] + list(constants.ACTUALS_WINDOWS.keys())
         df = df[[c for c in cols if c in df.columns]].copy()
@@ -134,7 +130,6 @@ def run_turning_point_processing(
 
         COL_CHILD = "Name of Child_6313"
 
-        # For GV TP: if deduped row has null Name of Child, look up from any row with a value
         if COL_CHILD in df.columns:
             is_gv_tp_null = (df[COL_PROGRAM] == "GV Turning Point") & df["Name of Child_6313"].isna()
             if is_gv_tp_null.any():
@@ -142,9 +137,6 @@ def run_turning_point_processing(
                 child_lookup = child_lookup.groupby(COL_RECORD_ID)["Name of Child_6313"].first()
                 df.loc[is_gv_tp_null, "Name of Child_6313"] = df.loc[is_gv_tp_null, COL_RECORD_ID].map(child_lookup)
 
-
-
-        # Number of Children — counts kids only for women's programs, no active filter
         WOMEN_PROGRAMS = [
             "Chester Women Turning Point", "Oakland Women Turning Point",
             "GV Turning Point", "Heritage Home", "San Jose Youth Collective"
@@ -158,10 +150,8 @@ def run_turning_point_processing(
             return len([p for p in parts if p.strip()])
         df["Number of Children"] = df.apply(count_kids_only, axis=1)
 
-        # Ensure OCC_CURRENT_LABEL is always int
         df[constants.OCC_CURRENT_LABEL] = pd.to_numeric(df[constants.OCC_CURRENT_LABEL], errors="coerce").fillna(0).astype(int)
 
-        # Sync Current Period Actuals with OCC_CURRENT_LABEL (includes child count for GV TP)
         if "Current Period Actuals" in df.columns:
             df["Current Period Actuals"] = df[constants.OCC_CURRENT_LABEL]
         df["Capacity"]           = df[COL_PROGRAM].map(constants.TP_CAPACITY)
@@ -181,17 +171,14 @@ def run_turning_point_processing(
         return df.reset_index(drop=True)
 
     def process_housed(df_raw):
-        # Start from df_raw so intern rows are present before any program filtering
         df = df_raw.copy()
         df[COL_PROGRAM]    = df[COL_PROGRAM].replace("Chester Women's Turning Point", "Chester Women Turning Point")
         df[COL_START_DATE] = pd.to_datetime(df[COL_START_DATE], errors="coerce")
         df[COL_EXIT_DATE]  = pd.to_datetime(df[COL_EXIT_DATE],  errors="coerce")
 
-        # Remap intern rows
         if COL_INTERN_PROGRAM in df.columns:
             is_intern = df[COL_PROGRAM] == "Program Graduate Intern"
             df.loc[is_intern, COL_PROGRAM] = df.loc[is_intern, COL_INTERN_PROGRAM].apply(match_program)
-            print(f"   Remapped {is_intern.sum()} Program Graduate Intern rows")
 
         df = df[df[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)
 
@@ -209,6 +196,12 @@ def run_turning_point_processing(
         df["Successfully Housed?"] = df[COL_HOUSED].astype(str).str.contains("Yes", case=False, na=False).astype(int) if COL_HOUSED in df.columns else 0
         df["Capacity"]            = df[COL_PROGRAM].map(constants.TP_CAPACITY)
 
+        # ---------------------------------------------------------------------
+        # Goal Column: Mapped from Column K of FY27 Goals tab (Default 0 for null)
+        # ---------------------------------------------------------------------
+        housed_goals_map = getattr(constants, "NEXT_FY_HOUSED_GOALS_TP", {})
+        df["Goal"] = df[COL_PROGRAM].map(housed_goals_map).fillna(0).astype(int)
+
         for k, (w_start, w_end) in constants.ACTUALS_WINDOWS.items():
             df[k] = (
                 df[COL_EXIT_DATE].notna() &
@@ -217,9 +210,11 @@ def run_turning_point_processing(
                 (df["Successfully Housed?"] == 1)
             ).astype(int)
 
+        # Reorder output columns including Goal
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
-                "City", "Year", "Quarter", "Year Q", "Successfully Housed?", "Capacity"
+                "City", "Year", "Quarter", "Year Q", "Successfully Housed?", "Capacity", "Goal"
                 ] + list(constants.ACTUALS_WINDOWS.keys())
+        
         df = df[[c for c in cols if c in df.columns]].copy()
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
         df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
@@ -233,8 +228,6 @@ def run_turning_point_processing(
     print("Processing Graduates...")
     df_grad = process_exited_category(df_base, reasons_list=["Graduation"])
 
-
-
     print("Processing Occupancy...")
     df_occ = process_occupancy(df_base)
 
@@ -247,7 +240,7 @@ def run_turning_point_processing(
     processed_file = find_file_id(drive_service, output_file, output_folder_id, "application/vnd.google-apps.spreadsheet")
     if processed_file:
         spreadsheet = gc.open_by_key(processed_file['id'])
-        print(f"📄 Opened existing: '{output_file}'")
+        print(f"📄 Opened existing spreadsheet: '{output_file}'")
     else:
         file_metadata = {
             'name': output_file,
@@ -256,7 +249,7 @@ def run_turning_point_processing(
         }
         new_sheet = drive_service.files().create(body=file_metadata, supportsAllDrives=True).execute()
         spreadsheet = gc.open_by_key(new_sheet['id'])
-        print(f"📄 Created new: '{output_file}'")
+        print(f"📄 Created new spreadsheet: '{output_file}'")
 
     # =========================================================================
     # 6. Export Tabs
@@ -271,7 +264,7 @@ def run_turning_point_processing(
     except:
         pass
 
-    print(f"\n🎉 Done!: {spreadsheet.url}")
+    print(f"\n🎉 Done! View sheet at: {spreadsheet.url}")
 
 
 if __name__ == "__main__":

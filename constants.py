@@ -70,8 +70,8 @@ ACTUALS_WINDOWS, PROGRAM_GOALS, PROGRAM_PROJECTIONS = {}, {}, {}
 PROGRAM_CAPACITY, PROGRAM_THEORETICAL_MAX = {}, {}
 OCCUPANCY_CAPACITY, OCCUPANCY_GOAL, OCCUPANCY_PRIOR_FY = {}, {}, {}
 LW_CRITERIA, TP_CAPACITY, TP_GOAL, TP_PRIOR_FY = {}, {}, {}, {}
-NEXT_FY_GRAD_GOALS, NEXT_FY_OCC_GOALS = {}, {}        # Renew
-NEXT_FY_GRAD_GOALS_TP, NEXT_FY_OCC_GOALS_TP = {}, {}  # Turning Point
+NEXT_FY_GRAD_GOALS, NEXT_FY_OCC_GOALS = {}, {}                                   # Renew
+NEXT_FY_GRAD_GOALS_TP, NEXT_FY_OCC_GOALS_TP, NEXT_FY_HOUSED_GOALS_TP = {}, {}, {}  # Turning Point
 
 
 # ============================================================
@@ -142,15 +142,16 @@ def sync_constants():
     # Load Next FY Goals from FY27 Goals tab
     try:
         fy27_data = sheets_service.spreadsheets().values().get(
-            spreadsheetId=target_file['id'], range="'FY27 Goals'!A1:J50"
+            spreadsheetId=target_file['id'], range="'FY27 Goals'!A1:K50"
         ).execute().get("values", [])
 
         def get_fy27(r_idx, c_idx):
             try:
                 val = fy27_data[r_idx][c_idx]
+                if pd.isna(val) or str(val).strip() == "": return 0
                 return float(str(val).replace("$", "").replace(",", "").strip())
             except (IndexError, ValueError, TypeError):
-                return None
+                return 0
 
         # Renew: Col B (Graduates), Col D (Occupancy)
         NEXT_FY_GRAD_GOALS.clear()
@@ -160,9 +161,10 @@ def sync_constants():
             NEXT_FY_GRAD_GOALS[prog] = get_fy27(row, 1)  # Col B
             NEXT_FY_OCC_GOALS[prog]  = get_fy27(row, 3)  # Col D
 
-        # Turning Point: Col G (Graduates), Col I (Occupancy)
+        # Turning Point: Col G (Graduates), Col I (Occupancy), Col K (Housed Goal)
         NEXT_FY_GRAD_GOALS_TP.clear()
         NEXT_FY_OCC_GOALS_TP.clear()
+        NEXT_FY_HOUSED_GOALS_TP.clear()
         tp_next_fy_rows = [6, 10, 14, 18, 22, 26, 30, 34, 38, 42]  # rows 7,11,15,19,23,27,31,35,39,43
         tp_next_fy_programs = [
             "Chester Men Turning Point", "Chester Women Turning Point",
@@ -172,8 +174,9 @@ def sync_constants():
             "San Jose Men Turning Point", "San Jose Youth Collective"
         ]
         for prog, row in zip(tp_next_fy_programs, tp_next_fy_rows):
-            NEXT_FY_GRAD_GOALS_TP[prog] = get_fy27(row, 6)  # Col G
-            NEXT_FY_OCC_GOALS_TP[prog]  = get_fy27(row, 8)  # Col I
+            NEXT_FY_GRAD_GOALS_TP[prog]   = get_fy27(row, 6)   # Col G
+            NEXT_FY_OCC_GOALS_TP[prog]    = get_fy27(row, 8)   # Col I
+            NEXT_FY_HOUSED_GOALS_TP[prog] = get_fy27(row, 10)  # Col K
         print("✅ Next FY Goals loaded.")
     except Exception as e:
         print(f"⚠️  Could not load FY27 Goals tab: {e}")
@@ -210,6 +213,7 @@ def sync_constants():
         "NEXT_FY_OCC_GOALS": NEXT_FY_OCC_GOALS,
         "NEXT_FY_GRAD_GOALS_TP": NEXT_FY_GRAD_GOALS_TP,
         "NEXT_FY_OCC_GOALS_TP": NEXT_FY_OCC_GOALS_TP,
+        "NEXT_FY_HOUSED_GOALS_TP": NEXT_FY_HOUSED_GOALS_TP,
     })
 
     ACTUALS_WINDOWS.clear()

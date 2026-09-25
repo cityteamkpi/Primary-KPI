@@ -3,6 +3,7 @@
 Renew Programs Processing Pipeline
 Processes Graduates, Occupancy, and Retention tabs for Q4 FY26.
 Retention cohort covers clients starting between 5/1/2026 (1 month prior) and 8/31/2026.
+Includes prior quarter (Q3) retention tracking metrics.
 """
 
 import warnings
@@ -65,6 +66,11 @@ def run_renew_processing(
     q_end_ts     = pd.Timestamp(constants.CURRENT_Q_END)        # 2026-08-31
     cohort_start = q_start_ts - pd.DateOffset(months=1)         # 2026-05-01 (1 month prior)
     far_future   = pd.Timestamp("2099-12-31")
+
+    # Q3 Boundaries (Prior Quarter + 1 Month Prior)
+    q3_start_ts     = q_start_ts - pd.DateOffset(months=3)      # 2026-03-01
+    q3_end_ts       = q_start_ts - pd.Timedelta(days=1)          # 2026-05-31
+    q3_cohort_start = q3_start_ts - pd.DateOffset(months=1)     # 2026-02-01
 
     input_folder_id  = resolve_folder_id(drive_service, input_folder_name, "Input")
     output_folder_id = resolve_folder_id(drive_service, output_folder_name, "Output")
@@ -195,43 +201,94 @@ def run_renew_processing(
                 .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM, COL_START_DATE], keep="first")
                 .drop(columns=["_no_exit"]))
 
-        # Filter considered cohort: Start date between 5/1/2026 and 8/31/2026
-        in_considered_cohort = (
+        # Dynamic timestamp for today (midnight)
+        today_ts = pd.Timestamp.now().normalize()
+
+        # Shared calculated fields
+        day_31_date = df[COL_START_DATE] + pd.Timedelta(days=31)
+        exit_date_filled = df[COL_EXIT_DATE].fillna(far_future)
+        is_graduated = df[COL_EXIT_REASON].isin(GRAD_REASONS)
+
+        # ---------------------------------------------------------------------
+        # 1. UP-TO-DATE METRICS (Evaluated using today_ts)
+        # ---------------------------------------------------------------------
+        # Up-to-date Cohort: Starts between 5/1/2026 and TODAY
+        in_up_to_date_cohort = (
+            (df[COL_START_DATE] >= cohort_start) & 
+            (df[COL_START_DATE] <= today_ts)
+        )
+
+        # Column A: Achieved 31 days (up to today)
+        reached_31_up_to_today = (
+            in_up_to_date_cohort &
+            (day_31_date >= q_start_ts) & 
+            (day_31_date <= today_ts) & 
+            (exit_date_filled >= day_31_date)
+        )
+        df["Achieved 31 days"] = reached_31_up_to_today.astype(int)
+
+        # Column B: Still in Program (After 31days) (active today & tenure >= 31 days)
+        is_active_today = exit_date_filled > today_ts
+        tenure_today = (today_ts - df[COL_START_DATE]).dt.days
+        still_31 = (
+            in_up_to_date_cohort &
+            is_active_today & 
+            (tenure_today >= 31)
+        )
+        df["Still in Program (After 31days)"] = still_31.astype(int)
+
+        # ---------------------------------------------------------------------
+        # 2. PRIOR QUARTER (Q3) METRICS
+        # ---------------------------------------------------------------------
+        # Q3 Cohort: Starts between 02/01/2026 and 05/31/2026
+        in_q3_cohort = (
+            (df[COL_START_DATE] >= q3_cohort_start) & 
+            (df[COL_START_DATE] <= q3_end_ts)
+        )
+
+        # Column: Achieved 31 days (Last Q)
+        reached_31_q3 = (
+            in_q3_cohort &
+            (day_31_date >= q3_start_ts) & 
+            (day_31_date <= q3_end_ts) & 
+            (exit_date_filled >= day_31_date)
+        )
+        df["Achieved 31 days (Last Q)"] = reached_31_q3.astype(int)
+
+        # Column: Still in Program After 31days (Last Q)
+        is_active_at_q3_end = exit_date_filled > q3_end_ts
+        tenure_at_q3_end = (q3_end_ts - df[COL_START_DATE]).dt.days
+        exceeded_31_at_q3_end = tenure_at_q3_end >= 31
+        stayed_over_31_days = exit_date_filled >= day_31_date
+
+        still_31_q3 = (
+            in_q3_cohort &
+            stayed_over_31_days &
+            (
+                (is_active_at_q3_end & exceeded_31_at_q3_end) |  # Still in program at 05/31/2026 with >=31 days
+                is_graduated                                     # Graduated after exceeding 31 days
+            )
+        )
+        df["Still in Program After 31days (Last Q)"] = still_31_q3.astype(int)
+
+        # ---------------------------------------------------------------------
+        # 3. STANDARD Q4 METRICS (Strictly evaluated using q_end_ts / 2026-08-31)
+        # ---------------------------------------------------------------------
+        # Fixed Q4 Cohort: Starts between 5/1/2026 and 8/31/2026
+        in_q4_cohort = (
             (df[COL_START_DATE] >= cohort_start) & 
             (df[COL_START_DATE] <= q_end_ts)
         )
 
-        day_31_date = df[COL_START_DATE] + pd.Timedelta(days=31)
-        exit_date_filled = df[COL_EXIT_DATE].fillna(far_future)
-
-        # 1. Achieved 31 days (Reached Day 31 within Q4 window)
-        reached_31_in_q = (
-            in_considered_cohort &
-            (day_31_date >= q_start_ts) & 
-            (day_31_date <= q_end_ts) & 
-            (exit_date_filled >= day_31_date)
-        )
-        df["Achieved 31 days"] = reached_31_in_q.astype(int)
-
-        # 2. Still in Program (After 31days): Active at Q End AND tenure >= 31 days
+        gap = (df[COL_EXIT_DATE].fillna(q_end_ts) - df[COL_START_DATE]).dt.days
         is_active_at_q_end = exit_date_filled > q_end_ts
-        tenure_at_q_end = (q_end_ts - df[COL_START_DATE]).dt.days
-        still_31 = (
-            in_considered_cohort &
-            is_active_at_q_end & 
-            (tenure_at_q_end >= 31)
-        )
-        df["Still in Program (After 31days)"] = still_31.astype(int)
 
-        # Additional metadata and indicators
         df["City"]     = df[COL_PROGRAM].apply(constants.assign_city)
         df["Capacity"] = df[COL_PROGRAM].map(constants.PROGRAM_CAPACITY)
         
         df["Year"]    = df[COL_START_DATE].apply(constants.get_fiscal_year)
         df["Quarter"] = df[COL_START_DATE].apply(constants.get_fiscal_quarter)
         df["Year Q"]  = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
-
-        gap = (df[COL_EXIT_DATE].fillna(q_end_ts) - df[COL_START_DATE]).dt.days
 
         df["Exit Reason Category"]  = df[COL_EXIT_REASON].apply(categorize_exit_reason)
         df["Entered Since Prior FY"] = (df[COL_EXIT_DATE].isna() | (gap > 30)).astype(int)
@@ -243,12 +300,14 @@ def run_renew_processing(
             (gap < 30)
         ).astype(int)
         df["Graduated"]              = (df[COL_EXIT_REASON].isin(GRAD_REASONS)).astype(int)
-        df["Still in Program"]       = (in_considered_cohort & is_active_at_q_end).astype(int)
+        df["Still in Program"]       = (in_q4_cohort & is_active_at_q_end).astype(int)
 
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
                 "Exit Reason Category", "City", "Year", "Quarter", "Year Q", "Capacity",
                 "Entered Since Prior FY", "Exit After 30 Days", "Exit Before 30 Days",
-                "Graduated", "Still in Program", "Still in Program (After 31days)", "Achieved 31 days"]
+                "Graduated", "Still in Program", 
+                "Still in Program (After 31days)", "Achieved 31 days",
+                "Still in Program After 31days (Last Q)", "Achieved 31 days (Last Q)"]
         df = df[[c for c in cols if c in df.columns]].copy()
 
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
