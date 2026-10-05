@@ -1,9 +1,10 @@
 # =========================================================================
 # This script processes program utilization.
 #
-# 1. Reads "Clients in All Programs.xlsx.xlsx"
-# 2. Creates "Clients in All Programs - Processed" Google Sheet 
-#       - with Renew, Men's TP and Women's TP tabs
+# 1. Reads "Clients in All Programs.xlsx"
+# 2. Creates/Updates "Clients in All Programs - Processed" Google Sheet 
+#       - with Renew, Men's TP, Women's TP tabs, etc.
+# 3. Computes averages into "Clients in All Programs Average"
 # =========================================================================
 
 import time
@@ -210,7 +211,7 @@ def run_utilization_processing(
             if prog in cols_list and children_col not in cols_list:
                 insert_idx = cols_list.index(prog) + 1
                 df_sheet.insert(insert_idx, children_col, 0)
-                cols_list = list(df_sheet.columns)  # update after insert
+                cols_list = list(df_sheet.columns)
 
         # Update today's row
         for program in df_sheet.columns:
@@ -230,51 +231,42 @@ def run_utilization_processing(
     # =========================================================================
     if df_mentorship is not None:
         try:
-            # Column names in Mentorship.xlsx
             COL_START     = "Start Date_2090"
             COL_MENTOR_DT = "Start Date for Mentoring_4365"
             COL_RECORD_ID = "Record Id_102"
 
             df_m = df_mentorship.copy()
 
-            # Parse dates
             if COL_START in df_m.columns:
                 df_m[COL_START] = pd.to_datetime(df_m[COL_START], errors="coerce")
             if COL_MENTOR_DT in df_m.columns:
                 df_m[COL_MENTOR_DT] = pd.to_datetime(df_m[COL_MENTOR_DT], errors="coerce")
 
-            # Filter: Acquired Spiritual Mentor = Yes
             COL_MENTOR = "Acquired Spiritual Mentor_5136"
             if COL_MENTOR in df_m.columns:
                 df_m = df_m[df_m[COL_MENTOR].astype(str).str.strip() == "Yes"]
 
-            # Filter: Exit Date is null (still in program)
             COL_EXIT = "Exit Date_2100"
             if COL_EXIT in df_m.columns:
                 df_m[COL_EXIT] = pd.to_datetime(df_m[COL_EXIT], errors="coerce")
                 df_m = df_m[df_m[COL_EXIT].isna()]
 
-            # Filter: in program > 60 days
             if COL_START in df_m.columns:
                 today = pd.Timestamp.now()
                 df_m = df_m[df_m[COL_START].notna() & ((today - df_m[COL_START]).dt.days > 60)]
 
-            # Dedup: one row per Record Id — keep latest Start Date_2090
-            # If still duplicates, use Start Date for Mentoring_4365
             if COL_RECORD_ID in df_m.columns and COL_START in df_m.columns:
                 df_m = df_m.sort_values(COL_START, ascending=False)
                 if COL_MENTOR_DT in df_m.columns:
                     df_m = df_m.sort_values([COL_START, COL_MENTOR_DT], ascending=[False, False])
                 df_m = df_m.drop_duplicates(subset=[COL_RECORD_ID], keep="first").reset_index(drop=True)
 
-            # Detect program column
             prog_col_candidates = [c for c in df_m.columns if 'Program Enrolling' in str(c)]
             COL_PROG = prog_col_candidates[0] if prog_col_candidates else None
 
             if COL_PROG is None:
                 raise ValueError("Program Enrolling column not found in Mentorship.xlsx")
 
-            # Get or create Mentorship tab
             try:
                 mentor_sheet = spreadsheet.worksheet("Mentorship")
                 mentor_df = pd.DataFrame(mentor_sheet.get_all_records())
@@ -286,29 +278,21 @@ def run_utilization_processing(
             except gspread.exceptions.WorksheetNotFound:
                 mentor_df = pd.DataFrame()
 
-            # Get program columns from tab header; fallback to unique programs in data
-            # Only include Renew + TP programs
             if not mentor_df.empty:
                 mentor_programs = [c for c in mentor_df.columns if c != "Total" and c in MENTOR_PROGRAMS]
             else:
                 mentor_programs = sorted(MENTOR_PROGRAMS)
 
-            # Filter to Renew + TP programs only
             df_m = df_m[df_m[COL_PROG].astype(str).str.strip().isin(MENTOR_PROGRAMS)]
-
-            # Count clients per program
             mentor_counts = df_m[COL_PROG].astype(str).str.strip().value_counts()
 
-            # Build today's row
             new_row = {prog: int(mentor_counts.get(prog, 0)) for prog in mentor_programs}
             new_row["Total"] = int(sum(new_row.values()))
 
-            # Overwrite if same date exists, otherwise append
             today_str = today_date
             if mentor_df.empty:
                 mentor_df = pd.DataFrame([new_row], index=pd.Index([today_str], name="Date"))
             else:
-                # Convert index to consistent string format
                 mentor_df.index = pd.to_datetime(mentor_df.index, errors="coerce", format="mixed")
                 mentor_df = mentor_df[mentor_df.index.notna()]
                 mentor_df.index = mentor_df.index.strftime('%-m/%-d/%y')
@@ -374,6 +358,13 @@ def run_averages_processing(
     def get_week_label(date):
         return f"Week {get_week_num(date)}"
 
+    def get_week_start_date(date):
+        fy = get_fy(date)
+        fy_start = pd.Timestamp(f"{fy-1}-09-01")
+        week_num = get_week_num(date)
+        start_date = fy_start + pd.Timedelta(days=(week_num - 1) * 7)
+        return start_date.strftime("%Y-%m-%d")
+
     def get_fy_week_label(date):
         return f"{get_fy_label(date)} Week {get_week_num(date)}"
 
@@ -404,7 +395,6 @@ def run_averages_processing(
                 df["Date"] = pd.to_datetime(df["Date"], errors="coerce", format="mixed")
                 df = df.dropna(subset=["Date"])
                 prog_cols = [c for c in df.columns if c != "Date" and not str(c).endswith("Number of Children") and str(c) != "Total"]
-                # For Mentorship tab, filter to Renew + TP programs only
                 if tab_name == "Mentorship":
                     prog_cols = [c for c in prog_cols if c in MENTOR_PROGRAMS]
                 return df, prog_cols
@@ -417,20 +407,35 @@ def run_averages_processing(
                     return None
         return None
 
-    def compute_averages(df, prog_cols, period_fn, fy_period_fn=None):
+    def compute_averages(df, prog_cols, period_fn, fy_period_fn=None, is_weekly=False):
         rows = []
         df = df.copy()
         df["_period"] = df["Date"].apply(period_fn)
         df["_fy_period"] = df["Date"].apply(fy_period_fn) if fy_period_fn else df["Date"].apply(period_fn)
         df["_fy"] = df["Date"].apply(get_fy_label)
+        if is_weekly:
+            df["_week_date"] = df["Date"].apply(get_week_start_date)
+
         for period, grp in df.groupby("_period", sort=False):
             fy = grp["_fy"].iloc[0]
             fy_period = grp["_fy_period"].iloc[0]
+            week_date = grp["_week_date"].iloc[0] if is_weekly else grp["Date"].min().strftime("%Y-%m-%d")
+            
             for prog in prog_cols:
                 if prog not in grp.columns: continue
                 vals = pd.to_numeric(grp[prog], errors="coerce").dropna()
                 avg = round(vals.mean(), 2) if not vals.empty else 0
-                rows.append({"FY": fy, "Period": period, "FY Period": fy_period, "Category": PROGRAM_CATEGORY.get(prog, "Other"), "Program": prog, "Average": avg})
+                
+                row_dict = {
+                    "FY": fy, 
+                    "Period": period, 
+                    "FY Period": fy_period, 
+                    "Date": week_date,
+                    "Category": PROGRAM_CATEGORY.get(prog, "Other"), 
+                    "Program": prog, 
+                    "Average": avg
+                }
+                rows.append(row_dict)
         return pd.DataFrame(rows)
 
     def write_averages(tab_name, df_avg, period_col_name):
@@ -438,18 +443,24 @@ def run_averages_processing(
             "Period": period_col_name,
             "FY Period": f"FY {period_col_name}"
         })
-        # Ensure column order
-        cols = ["FY", period_col_name, f"FY {period_col_name}", "Category", "Program", "Average"]
+        
+        cols = ["FY", period_col_name, f"FY {period_col_name}", "Date", "Category", "Program", "Average"]
         df_out = df_out[[c for c in cols if c in df_out.columns]]
+
         try:
             ws = out_ss.worksheet(tab_name)
             existing = pd.DataFrame(ws.get_all_records())
-            if not existing.empty and period_col_name in existing.columns:
+            
+            # If existing sheet exists but lacks 'Date', clear tab to refresh structure
+            if not existing.empty and "Date" in existing.columns and period_col_name in existing.columns:
                 merge_key = ["FY", period_col_name, "Program"]
                 existing = existing[~existing.set_index(merge_key).index.isin(df_out.set_index(merge_key).index)]
                 df_out = pd.concat([existing, df_out], ignore_index=True)
+            else:
+                ws.clear()
         except gspread.exceptions.WorksheetNotFound:
             pass
+
         write_tab(out_ss, tab_name, df_out)
         print(f"✅ {tab_name} written")
 
@@ -468,7 +479,7 @@ def run_averages_processing(
 
     if all_occ_dfs:
         df_occ = pd.concat(all_occ_dfs, ignore_index=True).groupby("Date", as_index=False).sum(numeric_only=True)
-        write_averages("Occupancy Weekly Avg",    compute_averages(df_occ, occ_prog_cols, get_week_label, get_fy_week_label), "Week")
+        write_averages("Occupancy Weekly Avg",    compute_averages(df_occ, occ_prog_cols, get_week_label, get_fy_week_label, is_weekly=True), "Week")
         write_averages("Occupancy Monthly Avg",   compute_averages(df_occ, occ_prog_cols, get_month, get_fy_month), "Month")
         write_averages("Occupancy Quarterly Avg", compute_averages(df_occ, occ_prog_cols, get_quarter, get_fy_quarter), "Quarter")
 
@@ -476,7 +487,7 @@ def run_averages_processing(
     result = read_tab("Mentorship")
     if result:
         df_m, mentor_progs = result
-        write_averages("Mentorship Weekly Avg",    compute_averages(df_m, mentor_progs, get_week_label, get_fy_week_label), "Week")
+        write_averages("Mentorship Weekly Avg",    compute_averages(df_m, mentor_progs, get_week_label, get_fy_week_label, is_weekly=True), "Week")
         write_averages("Mentorship Monthly Avg",   compute_averages(df_m, mentor_progs, get_month, get_fy_month), "Month")
         write_averages("Mentorship Quarterly Avg", compute_averages(df_m, mentor_progs, get_quarter, get_fy_quarter), "Quarter")
 
@@ -502,7 +513,7 @@ def run_averages_processing(
     }
 
     program_goals = {}
-    gv_tp_extra_count = 0  # To store cell P30 value from Sheet1
+    gv_tp_extra_count = 0
 
     try:
         _, _, _creds = get_services()
@@ -511,7 +522,6 @@ def run_averages_processing(
         _cf = find_file_id(drive_service, "Constants Update", _folder)
 
         if _cf:
-            # Batch fetch goal ranges from FY27 Goals + cell P30 from Sheet1
             ranges = [f"'FY27 Goals'!{cell}" for cell in PROGRAM_GOAL_CELLS.values()]
             ranges.append("'Sheet1'!P30")
 
@@ -519,7 +529,6 @@ def run_averages_processing(
                 spreadsheetId=_cf["id"], ranges=ranges
             ).execute()
 
-            # Map cell values to programs and extract P30
             value_ranges = batch_resp.get("valueRanges", [])
             cell_val_map = {}
             for vr in value_ranges:
@@ -538,7 +547,6 @@ def run_averages_processing(
                 else:
                     cell_val_map[cell_name] = num_val
 
-            # Assign retrieved values back to program key
             for prog, cell_ref in PROGRAM_GOAL_CELLS.items():
                 program_goals[prog] = cell_val_map.get(cell_ref, 0)
 
@@ -547,9 +555,7 @@ def run_averages_processing(
     except Exception as e:
         print(f"⚠️  Could not load Constants Update data: {e}")
 
-    # =========================================================================
-    # Latest Occupancy tab — most recent row from each occupancy tab
-    # =========================================================================
+    # Latest Occupancy tab
     latest_occ_rows = []
     for tab_name in occ_tabs:
         result = read_tab(tab_name)
@@ -570,25 +576,19 @@ def run_averages_processing(
         df_latest_occ = pd.DataFrame(latest_occ_rows)
         df_latest_occ["Count"] = df_latest_occ["Count"].fillna(0)
 
-        # Add Sheet1!P30 extra count to GV Turning Point
         gv_mask = df_latest_occ["Program"] == "GV Turning Point"
         if gv_mask.any():
             df_latest_occ.loc[gv_mask, "Count"] += gv_tp_extra_count
 
         df_latest_occ["Category"] = df_latest_occ["Program"].map(PROGRAM_CATEGORY).fillna("Other")
-        
-        # Map Next FY Goal using program name lookup
         df_latest_occ["Next FY Goal"] = df_latest_occ["Program"].map(program_goals).fillna(0).astype(int)
 
-        # Include Next FY Goal in column ordering
         df_latest_occ = df_latest_occ[["Date", "Category", "Program", "Count", "Next FY Goal"]]
 
         write_tab(out_ss, "Latest Occupancy", df_latest_occ)
         print("✅ Latest Occupancy tab written with updated GV Turning Point Count and Next FY Goal column")
 
-    # =========================================================================
-    # Latest Mentorship tab — most recent row from Mentorship tab
-    # =========================================================================
+    # Latest Mentorship tab
     result = read_tab("Mentorship")
     if result:
         df_m2, mentor_progs2 = result
@@ -616,5 +616,5 @@ def run_averages_processing(
 
 
 if __name__ == "__main__":
-    print("🚀 Starting Program Utilization Processing"),
+    print("🚀 Starting Program Utilization Processing")
     run_utilization_processing()

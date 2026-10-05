@@ -30,12 +30,22 @@ def run_kpi_impact_processing(
     COL_RECORD_ID  = "Record Id_102"
     COL_PROGRAM    = "Program Enrolling"
     COL_INTERN     = "Intern Program_6619"
-    COL_MENTORSHIP = "Acquired Spiritual Mentor_5136"
 
+    # Mentorship Flag Columns
+    COL_MENTORSHIP_OLD = "Acquired Spiritual Mentor_5136"
+    COL_MENTORSHIP_NEW = "Acquired Spiritual Mentor_7196"
+
+    # Mentorship Church Column
+    COL_MENTOR_CHURCH  = "Spiritual Mentor Church_6426"
+
+    # Date Columns Reference (New vs Old)
     DATE_COLS = {
-        "Mentorship"           : "Start Date for Mentoring_4365",
-        "Family Reunifications": "Date of Reunification_5140",
-        "CityTeam Baptisms"    : "Baptism Date_4378",
+        "Mentorship_Old"       : "Start Date for Mentoring_4365",
+        "Mentorship_New"       : "Start Date for Mentoring_7199",
+        "Reunifications_Old"   : "Date of Reunification_5140",
+        "Reunifications_New"   : "Date of Reunification_7018",
+        "Baptisms_Old"         : "Baptism Date_4378",
+        "Baptisms_New"         : "Date of Baptism_7016",
     }
 
     # =========================================================================
@@ -63,18 +73,76 @@ def run_kpi_impact_processing(
     # 3. Processing Function
     # =========================================================================
     def process_spiritual(label, df_raw):
-        date_col = DATE_COLS[label]
         df = df_raw.copy()
 
         print(f"\n--- {label} ---")
         print(f"   Raw rows: {len(df)}")
 
-        if date_col not in df.columns:
-            print(f"   Warning: '{date_col}' not found. Skipping.")
-            return pd.DataFrame()
+        # ---------------------------------------------------------------------
+        # Mentorship Specific Logic: Consolidate Mentor Flag & Date
+        # ---------------------------------------------------------------------
+        if label == "Mentorship":
+            date_col = "Mentorship_Date_Combined"
+            
+            # Combine Date Columns: Prioritize 7199, fallback to 4365
+            date_old = DATE_COLS["Mentorship_Old"]
+            date_new = DATE_COLS["Mentorship_New"]
 
-        # Parse date
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+            dt_new = pd.to_datetime(df[date_new], errors="coerce") if date_new in df.columns else pd.Series(pd.NaT, index=df.index)
+            dt_old = pd.to_datetime(df[date_old], errors="coerce") if date_old in df.columns else pd.Series(pd.NaT, index=df.index)
+
+            df[date_col] = dt_new.fillna(dt_old)
+
+            # Combine Mentor Flag: If either is "Yes" (prioritizing new column), result is "Yes"
+            val_new = df[COL_MENTORSHIP_NEW].astype(str).str.strip() if COL_MENTORSHIP_NEW in df.columns else pd.Series("", index=df.index)
+            val_old = df[COL_MENTORSHIP_OLD].astype(str).str.strip() if COL_MENTORSHIP_OLD in df.columns else pd.Series("", index=df.index)
+
+            is_yes_new = (val_new == "Yes")
+            is_yes_old = (val_old == "Yes")
+            
+            before = len(df)
+            df = df[is_yes_new | is_yes_old].copy().reset_index(drop=True)
+            print(f"   After Mentor=Yes filter (checking 7196 & 5136): {len(df)} rows (removed {before - len(df)})")
+
+        # ---------------------------------------------------------------------
+        # Family Reunifications Specific Logic: Consolidate Date Columns
+        # ---------------------------------------------------------------------
+        elif label == "Family Reunifications":
+            date_col = "Reunification_Date_Combined"
+
+            # Combine Date Columns: Prioritize Date of Reunification_7018, fallback to Date of Reunification_5140
+            date_old = DATE_COLS["Reunifications_Old"]
+            date_new = DATE_COLS["Reunifications_New"]
+
+            dt_new = pd.to_datetime(df[date_new], errors="coerce") if date_new in df.columns else pd.Series(pd.NaT, index=df.index)
+            dt_old = pd.to_datetime(df[date_old], errors="coerce") if date_old in df.columns else pd.Series(pd.NaT, index=df.index)
+
+            df[date_col] = dt_new.fillna(dt_old)
+
+        # ---------------------------------------------------------------------
+        # CityTeam Baptisms Specific Logic: Consolidate Date Columns
+        # ---------------------------------------------------------------------
+        elif label == "CityTeam Baptisms":
+            date_col = "Baptism_Date_Combined"
+
+            # Combine Date Columns: Prioritize Date of Baptism_7016, fallback to Baptism Date_4378
+            date_old = DATE_COLS["Baptisms_Old"]
+            date_new = DATE_COLS["Baptisms_New"]
+
+            dt_new = pd.to_datetime(df[date_new], errors="coerce") if date_new in df.columns else pd.Series(pd.NaT, index=df.index)
+            dt_old = pd.to_datetime(df[date_old], errors="coerce") if date_old in df.columns else pd.Series(pd.NaT, index=df.index)
+
+            df[date_col] = dt_new.fillna(dt_old)
+
+        else:
+            date_col = DATE_COLS.get(label, "")
+            if date_col not in df.columns:
+                print(f"   Warning: '{date_col}' not found. Skipping.")
+                return pd.DataFrame()
+
+            # Parse date for other datasets
+            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+
         print(f"   Non-null dates after parse: {df[date_col].notna().sum()}")
 
         # Filter to wide FY range — 4 years back to current FY end
@@ -86,12 +154,6 @@ def run_kpi_impact_processing(
         if df.empty:
             print(f"   Warning: No data remaining after date filter.")
             return pd.DataFrame()
-
-        # Mentorship: filter to Acquired Spiritual Mentor = Yes
-        if label == "Mentorship" and COL_MENTORSHIP in df.columns:
-            before = len(df)
-            df = df[df[COL_MENTORSHIP].astype(str).str.strip() == "Yes"].reset_index(drop=True)
-            print(f"   After Mentor=Yes filter: {len(df)} rows (removed {before - len(df)})")
 
         # Intern priority flag
         df["_intern_priority"] = 0
@@ -143,6 +205,9 @@ def run_kpi_impact_processing(
 
         # Explicit column selection
         BASE_COLS = [COL_RECORD_ID, COL_PROGRAM, "City", "Year", "Quarter", "Year Q"]
+        if label == "Mentorship":
+            BASE_COLS.append(COL_MENTOR_CHURCH)
+
         df = df[[c for c in BASE_COLS + actuals_cols if c in df.columns]]
 
         return df

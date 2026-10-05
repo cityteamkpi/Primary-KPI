@@ -13,16 +13,48 @@ import constants
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
+
+def combine_columns_with_priority(df, col_new, col_old, target_col):
+    """
+    Combines col_new and col_old into target_col:
+    - If BOTH col_new and col_old have values: target gets col_new, col_old is cleared (NaN/blank).
+    - If ONLY col_new has a value: target gets col_new, col_old remains untouched.
+    - If ONLY col_old has a value: target gets col_old, col_old remains intact.
+    """
+    s_new = df[col_new] if col_new in df.columns else pd.Series(np.nan, index=df.index)
+    s_old = df[col_old] if col_old in df.columns else pd.Series(np.nan, index=df.index)
+
+    # Convert empty strings / spaces / 'nan' / 'none' to NaN for accurate presence checking
+    def clean_series(s):
+        return s.astype(str).str.strip().replace(
+            {"": np.nan, "nan": np.nan, "None": np.nan, "NaT": np.nan}
+        )
+
+    s_new_clean = clean_series(s_new)
+    s_old_clean = clean_series(s_old)
+
+    new_valid = s_new_clean.notna()
+    old_valid = s_old_clean.notna()
+
+    # 1. Target takes new if valid; otherwise falls back to old
+    df[target_col] = s_new_clean.fillna(s_old_clean).fillna("")
+
+    # 2. ONLY clear col_old when BOTH col_new AND col_old have valid values
+    both_valid = new_valid & old_valid
+    if col_old in df.columns:
+        df[col_old] = df[col_old].where(~both_valid, other="")
+
+    return df
+
+
 def run_turning_point_processing(
     input_file="Turning Point Report.xlsx",
     output_file="Turning Point Report - Processed",
     input_folder_name=None,
     output_folder_name=None
 ):
-    # =========================================================================
     print("🚀 Starting Turning Point Processing")
-    # Spreadsheet-Specific Constants
-    # =========================================================================
+
     RAW_DATA_HEADER_ROW = 3
     RAW_DATA_START_COL  = 1
 
@@ -31,7 +63,8 @@ def run_turning_point_processing(
     COL_START_DATE     = "Start Date_2090"
     COL_EXIT_DATE      = "Exit Date_2100"
     COL_EXIT_REASON    = "Primary Reason for Exit_2102"
-    COL_HOUSED         = "Successfully Housed (Is Housing Healthy?)_4368"
+    COL_HOUSED_OLD     = "Successfully Housed (Is Housing Healthy?)_4368"
+    COL_HOUSED_NEW     = "Successfully Housed_7011"
     COL_INTERN_PROGRAM = "Intern Program_6619"
 
     PROGRAMS_TO_INCLUDE = [
@@ -41,23 +74,16 @@ def run_turning_point_processing(
         "Portland Youth Collective", "San Jose Youth Collective", "Chester Turning Point",
     ]
 
-    # =========================================================================
-    # 1. Initialize Services
-    # =========================================================================
     drive_service, gc, _ = get_services()
     constants.sync_constants()
 
     input_folder_id  = resolve_folder_id(drive_service, input_folder_name, "Input")
     output_folder_id = resolve_folder_id(drive_service, output_folder_name, "Output")
 
-    # =========================================================================
-    # 2. Download and Load Data
-    # =========================================================================
     print(f"Downloading {input_file}...")
     fh, _, _ = download_drive_file(drive_service, input_file, input_folder_id)
     df_raw = load_raw(fh, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
 
-    # Initial cleanup
     prog_lower_map = {p.lower(): p for p in PROGRAMS_TO_INCLUDE}
     def match_program(val):
         if pd.isna(val): return val
@@ -68,16 +94,12 @@ def run_turning_point_processing(
     df_base[COL_START_DATE] = pd.to_datetime(df_base[COL_START_DATE], errors="coerce")
     df_base[COL_EXIT_DATE]  = pd.to_datetime(df_base[COL_EXIT_DATE],  errors="coerce")
 
-    # Remap Program Graduate Interns to their specific Intern Program
     if COL_INTERN_PROGRAM in df_base.columns:
         is_intern = df_base[COL_PROGRAM] == "Program Graduate Intern"
         df_base.loc[is_intern, COL_PROGRAM] = df_base.loc[is_intern, COL_INTERN_PROGRAM].apply(match_program)
 
     df_base = df_base[df_base[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)
 
-    # =========================================================================
-    # 3. Processing Functions
-    # =========================================================================
     def fmt_date(df, col):
         return pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
 
@@ -182,26 +204,24 @@ def run_turning_point_processing(
 
         df = df[df[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)
 
-        df["_is_housed"]        = df[COL_HOUSED].astype(str).str.contains("Yes", case=False, na=False).astype(int) if COL_HOUSED in df.columns else 0
-        df["_is_exited_housed"] = (df[COL_EXIT_DATE].notna() & (df["_is_housed"] == 1)).astype(int)
+        # ---------------------------------------------------------------------
+        # 1. Combine new and old columns with priority (like @Work)
+        # ---------------------------------------------------------------------
+        df = combine_columns_with_priority(
+            df,
+            col_new=COL_HOUSED_NEW,
+            col_old=COL_HOUSED_OLD,
+            target_col="Successfully Housed Target"
+        )
 
-        df = (df.sort_values(COL_EXIT_DATE, ascending=False)
-                .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM], keep="first")
-                .drop(columns=["_is_housed", "_is_exited_housed"]))
-
-        df["City"]                = df[COL_PROGRAM].apply(constants.assign_city)
-        df["Year"]                = df[COL_EXIT_DATE].apply(constants.get_fiscal_year)
-        df["Quarter"]             = df[COL_EXIT_DATE].apply(constants.get_fiscal_quarter)
-        df["Year Q"]              = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
-        df["Successfully Housed?"] = df[COL_HOUSED].astype(str).str.contains("Yes", case=False, na=False).astype(int) if COL_HOUSED in df.columns else 0
-        df["Capacity"]            = df[COL_PROGRAM].map(constants.TP_CAPACITY)
+        df["Successfully Housed?"] = df["Successfully Housed Target"].astype(str).str.strip().str.lower().apply(
+            lambda v: 1 if "yes" in v else 0
+        )
 
         # ---------------------------------------------------------------------
-        # Goal Column: Mapped from Column K of FY27 Goals tab (Default 0 for null)
+        # 2. Calculate Actuals Windows BEFORE Deduplication
         # ---------------------------------------------------------------------
-        housed_goals_map = getattr(constants, "NEXT_FY_HOUSED_GOALS_TP", {})
-        df["Goal"] = df[COL_PROGRAM].map(housed_goals_map).fillna(0).astype(int)
-
+        actuals_cols = list(constants.ACTUALS_WINDOWS.keys())
         for k, (w_start, w_end) in constants.ACTUALS_WINDOWS.items():
             df[k] = (
                 df[COL_EXIT_DATE].notna() &
@@ -210,21 +230,42 @@ def run_turning_point_processing(
                 (df["Successfully Housed?"] == 1)
             ).astype(int)
 
-        # Reorder output columns including Goal
+        # Retain maximum actual flag per individual per program
+        id_actuals = df.groupby([COL_RECORD_ID, COL_PROGRAM])[actuals_cols].max()
+
+        # ---------------------------------------------------------------------
+        # 3. Deduplicate (Prioritize Successfully Housed = 1, then latest Exit Date)
+        # ---------------------------------------------------------------------
+        df = (df.sort_values(["Successfully Housed?", COL_EXIT_DATE], ascending=[False, False])
+                .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM], keep="first"))
+
+        # Re-merge the aggregated actuals
+        df = df.drop(columns=actuals_cols).merge(id_actuals, on=[COL_RECORD_ID, COL_PROGRAM], how="left")
+
+        # ---------------------------------------------------------------------
+        # 4. Map Metadata & Outputs
+        # ---------------------------------------------------------------------
+        df["City"]     = df[COL_PROGRAM].apply(constants.assign_city)
+        df["Year"]     = df[COL_EXIT_DATE].apply(constants.get_fiscal_year)
+        df["Quarter"]  = df[COL_EXIT_DATE].apply(constants.get_fiscal_quarter)
+        df["Year Q"]   = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
+        df["Capacity"] = df[COL_PROGRAM].map(constants.TP_CAPACITY)
+
+        housed_goals_map = getattr(constants, "NEXT_FY_HOUSED_GOALS_TP", {})
+        df["Goal"] = df[COL_PROGRAM].map(housed_goals_map).fillna(0).astype(int)
+
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
                 "City", "Year", "Quarter", "Year Q", "Successfully Housed?", "Capacity", "Goal"
-                ] + list(constants.ACTUALS_WINDOWS.keys())
-        
+                ] + actuals_cols
+
         df = df[[c for c in cols if c in df.columns]].copy()
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
         df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
-        for k in constants.ACTUALS_WINDOWS.keys():
+        for k in actuals_cols:
             if k in df.columns: df[k] = df[k].fillna(0).astype(int)
+
         return df.reset_index(drop=True)
 
-    # =========================================================================
-    # 4. Execute Processing
-    # =========================================================================
     print("Processing Graduates...")
     df_grad = process_exited_category(df_base, reasons_list=["Graduation"])
 
@@ -234,9 +275,6 @@ def run_turning_point_processing(
     print("Processing Housed...")
     df_housed = process_housed(df_raw)
 
-    # =========================================================================
-    # 5. Handle Output Spreadsheet
-    # =========================================================================
     processed_file = find_file_id(drive_service, output_file, output_folder_id, "application/vnd.google-apps.spreadsheet")
     if processed_file:
         spreadsheet = gc.open_by_key(processed_file['id'])
@@ -251,9 +289,6 @@ def run_turning_point_processing(
         spreadsheet = gc.open_by_key(new_sheet['id'])
         print(f"📄 Created new spreadsheet: '{output_file}'")
 
-    # =========================================================================
-    # 6. Export Tabs
-    # =========================================================================
     write_tab(spreadsheet, "Raw Data",                 df_raw)
     write_tab(spreadsheet, "Turning Point Graduates",  df_grad)
     write_tab(spreadsheet, "Turning Point Occupancy",  df_occ)
@@ -261,7 +296,7 @@ def run_turning_point_processing(
 
     try:
         spreadsheet.del_worksheet(spreadsheet.worksheet("Sheet1"))
-    except:
+    except Exception:
         pass
 
     print(f"\n🎉 Done! View sheet at: {spreadsheet.url}")
