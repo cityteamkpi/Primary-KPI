@@ -207,16 +207,11 @@ def run_renew_processing(
         day_31_date = df[COL_START_DATE] + pd.Timedelta(days=31)
         exit_date_filled = df[COL_EXIT_DATE].fillna(far_future)
 
-        # Categorize Exit Reason
+        # Categorize Exit Reason for reporting
         df["Exit Reason Category"] = df[COL_EXIT_REASON].apply(categorize_exit_reason)
 
-        # Graduation Flag: matches constants list OR categorized as "Graduation"
-        is_graduated = (
-            df[COL_EXIT_DATE].notna() & (
-                df[COL_EXIT_REASON].isin(GRAD_REASONS) | 
-                (df["Exit Reason Category"] == "Graduation")
-            )
-        )
+        # Graduation Flag: strictly matches constants list on primary reason for exit
+        is_graduated = df[COL_EXIT_DATE].notna() & df[COL_EXIT_REASON].isin(GRAD_REASONS)
 
         # ---------------------------------------------------------------------
         # 1. UP-TO-DATE METRICS (Evaluated using today_ts)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-This script processes @Work KPIs and Barriers.
+This script processes @Work KPIs and Barriers
 """
 
 import warnings
@@ -14,27 +14,29 @@ import constants
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 
-def combine_columns_with_priority(df, col_new, col_old, target_col):
+def combine_columns_with_priority(df, col_new, col_old, target_col, win_start, win_end):
     """
-    Combines col_new and col_old into target_col:
-    - If BOTH col_new and col_old have values: target gets col_new, col_old is cleared (pd.NaT).
-    - If ONLY col_new has a value: target gets col_new, col_old remains untouched.
-    - If ONLY col_old has a value: target gets col_old, col_old remains intact.
+    Combines col_new and col_old into target_col while respecting the fiscal quarter window:
+    - Parses both columns as datetimes.
+    - Filters both columns so only dates within [win_start, win_end] are valid.
+    - Uses col_new if valid and in-window; falls back to col_old if col_old is valid and in-window.
     """
-    s_new = pd.to_datetime(df[col_new], errors="coerce") if col_new in df.columns else pd.Series(pd.NaT, index=df.index)
-    s_old = pd.to_datetime(df[col_old], errors="coerce") if col_old in df.columns else pd.Series(pd.NaT, index=df.index)
+    invalid_tokens = ["", "nan", "none", "nat", "<na>"]
 
-    new_valid = s_new.notna()
-    old_valid = s_old.notna()
+    # Process NEW column
+    s_new = df[col_new].astype(str).str.strip().str.lower() if col_new in df.columns else pd.Series("", index=df.index)
+    s_new_clean = df[col_new].where(~s_new.isin(invalid_tokens), np.nan) if col_new in df.columns else pd.Series(np.nan, index=df.index)
+    dt_new = pd.to_datetime(s_new_clean, errors="coerce")
+    dt_new_valid = dt_new.where((dt_new >= win_start) & (dt_new <= win_end), pd.NaT)
 
-    # 1. Target takes s_new if valid; otherwise falls back to s_old
-    df[target_col] = s_new.fillna(s_old)
+    # Process OLD column
+    s_old = df[col_old].astype(str).str.strip().str.lower() if col_old in df.columns else pd.Series("", index=df.index)
+    s_old_clean = df[col_old].where(~s_old.isin(invalid_tokens), np.nan) if col_old in df.columns else pd.Series(np.nan, index=df.index)
+    dt_old = pd.to_datetime(s_old_clean, errors="coerce")
+    dt_old_valid = dt_old.where((dt_old >= win_start) & (dt_old <= win_end), pd.NaT)
 
-    # 2. ONLY clear col_old when BOTH col_new AND col_old have valid dates
-    both_valid = new_valid & old_valid
-    if col_old in df.columns:
-        df[col_old] = pd.to_datetime(df[col_old], errors="coerce").mask(both_valid, pd.NaT)
-
+    # Fallback to dt_old_valid if dt_new_valid is NaT
+    df[target_col] = dt_new_valid.fillna(dt_old_valid)
     return df
 
 
@@ -105,6 +107,8 @@ def run_atwork_processing(
         "Birth Certificate Obtained Date_6638",
         "State ID Obtained Date_6637",
         "Social Security Card Obtained Date_6639",
+        COL_JOB_ACQUIRED_NEW,
+        COL_JOB_ACQUIRED_OLD,
     ]
 
     # =========================================================================
@@ -172,7 +176,8 @@ def run_atwork_processing(
         df_den = df_src.drop_duplicates(subset=[COL_ID], keep="first")
         df_den = df_den.drop_duplicates(subset=["Name_2057"], keep="first").reset_index(drop=True)
 
-        # Numerator: expand barriers
+        # Numerator: expand barriers using vectorized explode
+        df_den = df_den.copy()
         df_den["_barriers_list"] = df_den[COL_BARRIER].fillna("").astype(str).apply(
             lambda v: [BARRIER_REMAP.get(b.strip(), b.strip()) for b in v.split("|") if b.strip()] or ["No Barriers"]
         )
@@ -187,12 +192,17 @@ def run_atwork_processing(
     def process_atwork_kpis(df_raw):
         df = df_raw.copy()
 
-        # Combine _7009 and _5590
+        win_start = constants.CURRENT_FY_QX_START
+        win_end   = constants.CURRENT_Q_END
+
+        # Combine _7009 and _5590 into 'Date Job Acquired' with window validation
         df = combine_columns_with_priority(
             df,
             col_new=COL_JOB_ACQUIRED_NEW,
             col_old=COL_JOB_ACQUIRED_OLD,
-            target_col="Date Job Acquired"
+            target_col="Date Job Acquired",
+            win_start=win_start,
+            win_end=win_end
         )
 
         date_cols_all     = [c for c in df.columns if "Date" in c]
@@ -200,21 +210,18 @@ def run_atwork_processing(
         existing_ic_cols  = [c for c in IC_DATE_COLS if c in df.columns]
         existing_ext_cols = [c for c in EXTRA_WINDOW_COLS if c in df.columns]
 
-        # Parse all date columns to datetime
+        # Parse all date columns into datetime objects
         for col in date_cols_all:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
-        # Aggregate participant rows
+        # Merge client rows — max date takes latest populated job acquired date across records
         agg_dict = {col: "first" for col in non_date_cols}
         agg_dict.update({col: "max" for col in date_cols_all})
         df = df.sort_values(COL_DATE, ascending=False).groupby(COL_ID, sort=False).agg(agg_dict).reset_index()
 
-        win_start = constants.CURRENT_FY_QX_START
-        win_end   = constants.CURRENT_Q_END
+        start_parsed = df[COL_DATE] if COL_DATE in df.columns else pd.Series(pd.NaT, index=df.index)
 
-        start_parsed = pd.to_datetime(df[COL_DATE], errors="coerce") if COL_DATE in df.columns else pd.Series(pd.NaT, index=df.index)
-
-        # Program eligibility filtering
+        # Vectorized eligibility
         prog_series   = df[COL_PROG].astype(str).str.strip()
         intern_series = df[COL_INTERN].astype(str).str.strip() if COL_INTERN in df.columns else pd.Series("", index=df.index)
         is_pgi        = prog_series == "Program Graduate Intern"
@@ -231,15 +238,12 @@ def run_atwork_processing(
         else:
             df["Need HSE"] = 0
 
-        # Need DL
+        # Need DL — from barriers lookup
         df = df.merge(df_dl_lookup, on=COL_ID, how="left")
         df["Need DL"] = df["Need DL"].fillna(0).astype(int).where(need_mask, other=0)
 
-        # Job acquired columns to be restricted to date window
-        job_date_cols = ["Date Job Acquired", COL_JOB_ACQUIRED_NEW, COL_JOB_ACQUIRED_OLD]
-
-        # Apply date window restriction
-        for col in existing_ic_cols + existing_ext_cols + job_date_cols:
+        # Apply window filter to remaining IC and extra window date columns
+        for col in existing_ic_cols + existing_ext_cols:
             if col in df.columns:
                 df[col] = df[col].where(
                     df[col].notna() & (df[col] >= win_start) & (df[col] <= win_end),
@@ -249,14 +253,14 @@ def run_atwork_processing(
         df["Total IC"]   = df[[c for c in existing_ic_cols if c in df.columns]].notna().sum(axis=1)
         df["At least 1"] = (df["Total IC"] >= 1).astype(int)
 
-        # Assign City
+        # City — vectorized
         city_source = pd.Series(np.where(
             is_pgi & intern_series.notna() & (intern_series != "nan"),
             intern_series, prog_series
         ), index=df.index)
         df["City"] = city_source.apply(constants.assign_city)
 
-        # Format date columns back to string output
+        # Convert date cols to strings
         for col in date_cols_all:
             if col in df.columns:
                 df[col] = df[col].apply(lambda x: x.strftime("%m/%d/%Y") if pd.notna(x) else "")
@@ -276,7 +280,7 @@ def run_atwork_processing(
     df_atwork_proc = process_atwork_kpis(df_raw_atwork)
 
     # =========================================================================
-    # 6. Output to Google Spreadsheet
+    # 6. Handle Output Spreadsheet
     # =========================================================================
     processed_file = find_file_id(drive_service, output_file, output_folder_id, "application/vnd.google-apps.spreadsheet")
     if processed_file:
@@ -293,7 +297,7 @@ def run_atwork_processing(
         print(f"📄 Created new: '{output_file}'")
 
     # =========================================================================
-    # 7. Write Worksheets
+    # 7. Export Tabs
     # =========================================================================
     write_tab(spreadsheet, "Barriers Raw Data", df_raw_barriers)
 
@@ -315,7 +319,7 @@ def run_atwork_processing(
 
     try:
         spreadsheet.del_worksheet(spreadsheet.worksheet("Sheet1"))
-    except Exception:
+    except:
         pass
 
     print(f"\n🎉 Done!: {spreadsheet.url}")
