@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-This script processes the Turning Point Report and outputs key KPI tabs.
+This script processes the Turning Point Report and outputs key KPI tabs,
+including Weekly (FY26+), Monthly, and Quarterly average tabs for Graduates and Successfully Housed.
+Includes complete zero-filling across all programs up to the current date.
 """
 
+import time
 import warnings
 import pandas as pd
 import numpy as np
@@ -12,6 +15,23 @@ from drive_utils import resolve_folder_id, download_drive_file, find_file_id, lo
 import constants
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
+
+# Map programs to high-level categories
+TP_PROGRAM_CATEGORY = {
+    "Chester Men Turning Point": "Men Turning Point",
+    "Oakland Men Turning Point": "Men Turning Point",
+    "San Jose Men Turning Point": "Men Turning Point",
+    "Portland Men Turning Point": "Men Turning Point",
+    "Chester Women Turning Point": "Women Turning Point",
+    "GV Turning Point": "Women Turning Point",
+    "Heritage Home": "Women Turning Point",
+    "Oakland Women Turning Point": "Women Turning Point",
+    "Portland Community of Hope": "Women Turning Point",
+    "San Jose Youth Collective": "Women Turning Point",
+    "Oakland Youth Collective": "Women Turning Point",
+    "Portland Youth Collective": "Women Turning Point",
+    "Chester Turning Point": "Turning Point",
+}
 
 def run_turning_point_processing(
     input_file="Turning Point Report.xlsx",
@@ -33,6 +53,7 @@ def run_turning_point_processing(
     COL_EXIT_REASON    = "Primary Reason for Exit_2102"
     COL_HOUSED_OLD     = "Successfully Housed (Is Housing Healthy?)_4368"
     COL_HOUSED_NEW     = "Successfully Housed_7011"
+    COL_HOUSING_CHECK  = "Date of Housing Check_5141"
     COL_INTERN_PROGRAM = "Intern Program_6619"
 
     PROGRAMS_TO_INCLUDE = [
@@ -68,6 +89,8 @@ def run_turning_point_processing(
     df_base[COL_PROGRAM]    = df_base[COL_PROGRAM].replace("Chester Women's Turning Point", "Chester Women Turning Point")
     df_base[COL_START_DATE] = pd.to_datetime(df_base[COL_START_DATE], errors="coerce")
     df_base[COL_EXIT_DATE]  = pd.to_datetime(df_base[COL_EXIT_DATE],  errors="coerce")
+    if COL_HOUSING_CHECK in df_base.columns:
+        df_base[COL_HOUSING_CHECK] = pd.to_datetime(df_base[COL_HOUSING_CHECK], errors="coerce")
 
     # Remap Program Graduate Interns to their specific Intern Program
     if COL_INTERN_PROGRAM in df_base.columns:
@@ -75,6 +98,11 @@ def run_turning_point_processing(
         df_base.loc[is_intern, COL_PROGRAM] = df_base.loc[is_intern, COL_INTERN_PROGRAM].apply(match_program)
 
     df_base = df_base[df_base[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)
+
+    # Helper function to get Monday start of week
+    def get_week_start(dt_series):
+        dt = pd.to_datetime(dt_series, errors="coerce")
+        return dt.apply(lambda d: (d - pd.Timedelta(days=d.weekday())).strftime("%Y-%m-%d") if pd.notna(d) else "")
 
     # =========================================================================
     # 3. Processing Functions
@@ -98,13 +126,14 @@ def run_turning_point_processing(
         df["Year"]         = df[COL_EXIT_DATE].apply(constants.get_fiscal_year)
         df["Quarter"]      = df[COL_EXIT_DATE].apply(constants.get_fiscal_quarter)
         df["Year Q"]       = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
+        df["Week"]         = get_week_start(df[COL_EXIT_DATE])
         df["Next FY Goal"] = df[COL_PROGRAM].map(constants.NEXT_FY_GRAD_GOALS_TP)
 
         for k, (w_start, w_end) in constants.ACTUALS_WINDOWS.items():
             df[k] = (df[COL_EXIT_DATE].notna() & (df[COL_EXIT_DATE] >= w_start) & (df[COL_EXIT_DATE] <= w_end)).astype(int)
 
         cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
-                "City", "Year", "Quarter", "Year Q", "Next FY Goal"] + list(constants.ACTUALS_WINDOWS.keys())
+                "City", "Year", "Quarter", "Year Q", "Week", "Next FY Goal"] + list(constants.ACTUALS_WINDOWS.keys())
         df = df[[c for c in cols if c in df.columns]].copy()
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
         df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
@@ -176,6 +205,8 @@ def run_turning_point_processing(
         df[COL_PROGRAM]    = df[COL_PROGRAM].replace("Chester Women's Turning Point", "Chester Women Turning Point")
         df[COL_START_DATE] = pd.to_datetime(df[COL_START_DATE], errors="coerce")
         df[COL_EXIT_DATE]  = pd.to_datetime(df[COL_EXIT_DATE],  errors="coerce")
+        if COL_HOUSING_CHECK in df.columns:
+            df[COL_HOUSING_CHECK] = pd.to_datetime(df[COL_HOUSING_CHECK], errors="coerce")
 
         if COL_INTERN_PROGRAM in df.columns:
             is_intern = df[COL_PROGRAM] == "Program Graduate Intern"
@@ -183,9 +214,6 @@ def run_turning_point_processing(
 
         df = df[df[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)
 
-        # ---------------------------------------------------------------------
-        # 1. Evaluate Housing Flag (Prioritize COL_HOUSED_NEW over COL_HOUSED_OLD)
-        # ---------------------------------------------------------------------
         def eval_housed(row):
             val_n = str(row.get(COL_HOUSED_NEW, '')).strip().lower() if COL_HOUSED_NEW in row else ''
             if val_n not in ['', 'nan', 'none', 'nat']:
@@ -199,9 +227,6 @@ def run_turning_point_processing(
 
         df["Successfully Housed?"] = df.apply(eval_housed, axis=1)
 
-        # ---------------------------------------------------------------------
-        # 2. Calculate Actuals Windows BEFORE Deduplication
-        # ---------------------------------------------------------------------
         actuals_cols = list(constants.ACTUALS_WINDOWS.keys())
         for k, (w_start, w_end) in constants.ACTUALS_WINDOWS.items():
             df[k] = (
@@ -211,42 +236,170 @@ def run_turning_point_processing(
                 (df["Successfully Housed?"] == 1)
             ).astype(int)
 
-        # Retain maximum actual flag per individual per program
         id_actuals = df.groupby([COL_RECORD_ID, COL_PROGRAM])[actuals_cols].max()
 
-        # ---------------------------------------------------------------------
-        # 3. Deduplicate (Prioritize Successfully Housed = 1, then latest Exit Date)
-        # ---------------------------------------------------------------------
         df = (df.sort_values(["Successfully Housed?", COL_EXIT_DATE], ascending=[False, False])
                 .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM], keep="first"))
 
-        # Re-merge the aggregated actuals
         df = df.drop(columns=actuals_cols).merge(id_actuals, on=[COL_RECORD_ID, COL_PROGRAM], how="left")
 
-        # ---------------------------------------------------------------------
-        # 4. Map Metadata & Outputs
-        # ---------------------------------------------------------------------
         df["City"]     = df[COL_PROGRAM].apply(constants.assign_city)
         df["Year"]     = df[COL_EXIT_DATE].apply(constants.get_fiscal_year)
         df["Quarter"]  = df[COL_EXIT_DATE].apply(constants.get_fiscal_quarter)
         df["Year Q"]   = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
+        
+        # Determine Week based on Date of Housing Check (fallback to Exit Date)
+        housing_check_or_exit = df[COL_HOUSING_CHECK].fillna(df[COL_EXIT_DATE]) if COL_HOUSING_CHECK in df.columns else df[COL_EXIT_DATE]
+        df["Week"]     = get_week_start(housing_check_or_exit)
+
         df["Capacity"] = df[COL_PROGRAM].map(constants.TP_CAPACITY)
 
-        # Goal Column: Mapped from Column K of FY27 Goals tab (Default 0 for null)
         housed_goals_map = getattr(constants, "NEXT_FY_HOUSED_GOALS_TP", {})
         df["Goal"] = df[COL_PROGRAM].map(housed_goals_map).fillna(0).astype(int)
 
-        cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
-                "City", "Year", "Quarter", "Year Q", "Successfully Housed?", "Capacity", "Goal"
+        cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_HOUSING_CHECK, COL_EXIT_REASON,
+                "City", "Year", "Quarter", "Year Q", "Week", "Successfully Housed?", "Capacity", "Goal"
                 ] + actuals_cols
 
         df = df[[c for c in cols if c in df.columns]].copy()
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
         df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
+        if COL_HOUSING_CHECK in df.columns:
+            df[COL_HOUSING_CHECK] = fmt_date(df, COL_HOUSING_CHECK)
         for k in actuals_cols:
             if k in df.columns: df[k] = df[k].fillna(0).astype(int)
             
         return df.reset_index(drop=True)
+
+    # =========================================================================
+    # Helper Functions for Averages Processing
+    # =========================================================================
+    def get_fy(date):
+        return date.year + 1 if date.month >= 9 else date.year
+
+    def get_fy_label(date):
+        fy = get_fy(date)
+        return f"FY{str(fy)[-2:]}"
+
+    def get_week_num(date):
+        fy = get_fy(date)
+        fy_start = pd.Timestamp(f"{fy-1}-09-01")
+        delta = (date - fy_start).days
+        return min(52, max(1, delta // 7 + 1))
+
+    def get_week_label(date):
+        return f"Week {get_week_num(date)}"
+
+    def get_fy_week_label(date):
+        return f"{get_fy_label(date)} Week {get_week_num(date)}"
+
+    def get_month(date):
+        return date.strftime("%B")
+
+    def get_fy_month(date):
+        return date.strftime("%B %Y")
+
+    def get_quarter(date):
+        m = date.month
+        if m in [9, 10, 11]: return "Q1"
+        elif m in [12, 1, 2]: return "Q2"
+        elif m in [3, 4, 5]: return "Q3"
+        else: return "Q4"
+
+    def get_fy_quarter(date):
+        return f"{get_fy_label(date)} {get_quarter(date)}"
+
+    def compute_kpi_averages(df_source, date_col, period_fn, fy_period_fn=None, is_weekly=False, filter_flag_col=None, min_fy=None):
+        if df_source.empty:
+            return pd.DataFrame()
+
+        df = df_source.copy()
+
+        # Dynamic date resolution with fallback to COL_EXIT_DATE
+        if date_col in df.columns:
+            df["_Date"] = pd.to_datetime(df[date_col], errors="coerce")
+            if COL_EXIT_DATE in df.columns:
+                df["_Date"] = df["_Date"].fillna(pd.to_datetime(df[COL_EXIT_DATE], errors="coerce"))
+        elif COL_EXIT_DATE in df.columns:
+            df["_Date"] = pd.to_datetime(df[COL_EXIT_DATE], errors="coerce")
+        else:
+            return pd.DataFrame()
+
+        df = df.dropna(subset=["_Date"])
+
+        if filter_flag_col and filter_flag_col in df.columns:
+            df = df[pd.to_numeric(df[filter_flag_col], errors="coerce") == 1]
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # Build timeline up to current date
+        min_date = df["_Date"].min()
+        max_date = pd.Timestamp.now()
+        
+        timeline = pd.date_range(start=min_date, end=max_date, freq='D')
+        df_timeline = pd.DataFrame({"_Date": timeline})
+        df_timeline["_period"] = df_timeline["_Date"].apply(period_fn)
+        df_timeline["_fy_period"] = df_timeline["_Date"].apply(fy_period_fn) if fy_period_fn else df_timeline["_period"]
+        df_timeline["_fy"] = df_timeline["_Date"].apply(get_fy_label)
+
+        if is_weekly:
+            df_timeline["_week_date"] = df_timeline["_Date"].apply(lambda d: (d - pd.Timedelta(days=d.weekday())).strftime("%Y-%m-%d"))
+        else:
+            df_timeline["_week_date"] = df_timeline["_Date"].dt.strftime("%Y-%m-%d")
+
+        if min_fy:
+            df_timeline = df_timeline[df_timeline["_fy"] >= min_fy]
+
+        if df_timeline.empty:
+            return pd.DataFrame()
+
+        unique_periods = df_timeline.groupby("_fy_period", sort=False).first().reset_index()
+
+        # Map actual counts using compound _fy_period key
+        df["_fy_period"] = df["_Date"].apply(fy_period_fn) if fy_period_fn else df["_Date"].apply(period_fn)
+        counts = df.groupby(["_fy_period", COL_PROGRAM]).size().to_dict()
+
+        rows = []
+        for _, p_row in unique_periods.iterrows():
+            fy_period = p_row["_fy_period"]
+            period = p_row["_period"]
+            fy = p_row["_fy"]
+            date_val = p_row["_week_date"] if is_weekly else p_row["_Date"].strftime("%Y-%m-%d")
+
+            for prog in PROGRAMS_TO_INCLUDE:
+                cat_val = TP_PROGRAM_CATEGORY.get(prog, "Turning Point")
+                city_val = constants.assign_city(prog)
+                
+                total_count = float(counts.get((fy_period, prog), 0))
+
+                rows.append({
+                    "FY": fy,
+                    "Period": period,
+                    "FY Period": fy_period,
+                    "Date": date_val,
+                    "Category": cat_val,
+                    "City": city_val,
+                    "Program": prog,
+                    "Average": total_count
+                })
+
+        return pd.DataFrame(rows)
+
+    def write_averages_tab(out_ss, tab_name, df_avg, period_col_name):
+        if df_avg.empty:
+            return
+        
+        df_out = df_avg.rename(columns={
+            "Period": period_col_name,
+            "FY Period": f"FY {period_col_name}"
+        })
+
+        cols = ["FY", period_col_name, f"FY {period_col_name}", "Date", "Category", "City", "Program", "Average"]
+        df_out = df_out[[c for c in cols if c in df_out.columns]]
+
+        write_tab(out_ss, tab_name, df_out)
+        print(f"✅ {tab_name} written")
 
     # =========================================================================
     # 4. Execute Processing
@@ -278,12 +431,32 @@ def run_turning_point_processing(
         print(f"📄 Created new spreadsheet: '{output_file}'")
 
     # =========================================================================
-    # 6. Export Tabs
+    # 6. Export Main Tabs
     # =========================================================================
     write_tab(spreadsheet, "Raw Data",                 df_raw)
     write_tab(spreadsheet, "Turning Point Graduates",  df_grad)
     write_tab(spreadsheet, "Turning Point Occupancy",  df_occ)
     write_tab(spreadsheet, "Successfully Housed",      df_housed)
+
+    # =========================================================================
+    # 7. Compute & Export KPI Average Tabs
+    # =========================================================================
+    print("\nComputing Graduates Averages...")
+    write_averages_tab(spreadsheet, "Graduates Weekly Avg", 
+                       compute_kpi_averages(df_grad, COL_EXIT_DATE, get_week_label, get_fy_week_label, is_weekly=True, min_fy="FY26"), "Week")
+    write_averages_tab(spreadsheet, "Graduates Monthly Avg", 
+                       compute_kpi_averages(df_grad, COL_EXIT_DATE, get_month, get_fy_month), "Month")
+    write_averages_tab(spreadsheet, "Graduates Quarterly Avg", 
+                       compute_kpi_averages(df_grad, COL_EXIT_DATE, get_quarter, get_fy_quarter), "Quarter")
+
+    print("\nComputing Successfully Housed Averages...")
+    housed_date_col = COL_HOUSING_CHECK if COL_HOUSING_CHECK in df_housed.columns else COL_EXIT_DATE
+    write_averages_tab(spreadsheet, "Successfully Housed Weekly Avg", 
+                       compute_kpi_averages(df_housed, housed_date_col, get_week_label, get_fy_week_label, is_weekly=True, filter_flag_col="Successfully Housed?", min_fy="FY26"), "Week")
+    write_averages_tab(spreadsheet, "Successfully Housed Monthly Avg", 
+                       compute_kpi_averages(df_housed, housed_date_col, get_month, get_fy_month, filter_flag_col="Successfully Housed?"), "Month")
+    write_averages_tab(spreadsheet, "Successfully Housed Quarterly Avg", 
+                       compute_kpi_averages(df_housed, housed_date_col, get_quarter, get_fy_quarter, filter_flag_col="Successfully Housed?"), "Quarter")
 
     try:
         spreadsheet.del_worksheet(spreadsheet.worksheet("Sheet1"))
