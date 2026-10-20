@@ -145,9 +145,9 @@ def run_kpi_impact_processing(
 
         print(f"   Non-null dates after parse: {df[date_col].notna().sum()}")
 
-        # Filter to wide FY range — 4 years back to current FY end
+        # Filter to wide FY range — updated to include current/next FY (FY27+)
         _wide_start = pd.Timestamp(f"{constants.fy_num - 4}-09-01")
-        _wide_end   = pd.Timestamp(f"{constants.fy_num}-08-31")
+        _wide_end   = pd.Timestamp(f"{constants.fy_num + 1}-08-31")
         df = df[(df[date_col] >= _wide_start) & (df[date_col] <= _wide_end)].copy().reset_index(drop=True)
         print(f"   After FY range filter: {len(df)} rows")
 

@@ -199,8 +199,10 @@ def run_renew_processing(
     def calc_days_time_window(days):
         if pd.isna(days):
             return np.nan
-        if days <= 30:
-            return "30days"
+        if days <= 7:
+            return "7days"
+        elif days <= 30:
+            return "8~30days"
         elif days <= 60:
             return "31~60days"
         elif days <= 90:
@@ -227,21 +229,6 @@ def run_renew_processing(
         if pd.notna(val) and str(val).strip().lower() == "enrolled":
             return 1
         return 0
-
-    def calc_aftercare_window_range(row, min_days, max_days):
-        """Checks if a client had a valid checkin reaching them within a rolling day range from TODAY."""
-        today = pd.Timestamp.now().normalize()
-        checkin_dt = pd.to_datetime(row.get(COL_CHECKIN_DATE), errors="coerce")
-        how_checked = str(row.get(COL_HOW_CHECKED, "")).strip().lower()
-
-        if pd.isna(checkin_dt):
-            return 0
-
-        valid_method = any(method in how_checked for method in VALID_HOW_CHECKED)
-        days_ago = (today - checkin_dt).days
-
-        within_window = (days_ago >= min_days) and (days_ago <= max_days)
-        return 1 if (valid_method and within_window) else 0
 
     def calculate_current_module(row):
         if pd.notna(row.get(COL_EXIT_DATE)):
@@ -394,26 +381,48 @@ def run_renew_processing(
     # =========================================================================
     def process_graduates(df_base):
         df = df_base.copy()
+
+        # -------------------------------------------------------------------------
+        # Step A: Aggregate Aftercare across ALL check-in rows per client ID first
+        # -------------------------------------------------------------------------
+        today_ts = pd.Timestamp.now().normalize()
+        df["_checkin_dt"] = pd.to_datetime(df[COL_CHECKIN_DATE], errors="coerce")
+        df["_days_ago"]   = (today_ts - df["_checkin_dt"]).dt.days
+
+        # Check for valid contact methods (case-insensitive substring match)
+        how_checked_series = df[COL_HOW_CHECKED].fillna("").astype(str).str.lower()
+        df["_is_valid_method"] = how_checked_series.apply(
+            lambda val: any(method in val for method in VALID_HOW_CHECKED)
+        )
+
+        # Identify client Record IDs with AT LEAST ONE valid check-in row per window
+        mask_valid = df["_is_valid_method"] & df["_checkin_dt"].notna()
+        
+        ids_30 = set(df[mask_valid & (df["_days_ago"] >= 0)  & (df["_days_ago"] <= 30)][COL_RECORD_ID])
+        ids_60 = set(df[mask_valid & (df["_days_ago"] >= 31) & (df["_days_ago"] <= 60)][COL_RECORD_ID])
+        ids_90 = set(df[mask_valid & (df["_days_ago"] >= 61) & (df["_days_ago"] <= 90)][COL_RECORD_ID])
+
+        # -------------------------------------------------------------------------
+        # Step B: Filter and Deduplicate to Graduate summary rows
+        # -------------------------------------------------------------------------
         df["_is_grad"] = df[COL_EXIT_REASON].isin(GRAD_REASONS).astype(int)
         df = (df.sort_values(["_is_grad", COL_EXIT_DATE], ascending=[False, False])
                 .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM, COL_START_DATE], keep="first")
-                .drop(columns=["_is_grad"]))
+                .drop(columns=["_is_grad", "_checkin_dt", "_days_ago", "_is_valid_method"]))
+        
         df = df[df[COL_EXIT_DATE].notna() & df[COL_EXIT_REASON].isin(GRAD_REASONS)].copy()
 
         df["City"]            = df[COL_PROGRAM].apply(assign_city_custom)
         df["Year"]            = df[COL_EXIT_DATE].apply(constants.get_fiscal_year)
         df["Quarter"]         = df[COL_EXIT_DATE].apply(constants.get_fiscal_quarter)
         df["Year Q"]          = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
-        
-        # Calculate First Day of Exit Month
         df["Month"]           = pd.to_datetime(df[COL_EXIT_DATE], errors="coerce").dt.strftime("%Y-%m-01").fillna("")
-
         df["Days in Program"] = calc_days_in_program(df)
         
-        # Calculate Rolling Outreach/Engagement Windows from TODAY
-        df["Aftercare30"] = df.apply(lambda r: calc_aftercare_window_range(r, 0, 30), axis=1)
-        df["Aftercare60"] = df.apply(lambda r: calc_aftercare_window_range(r, 31, 60), axis=1)
-        df["Aftercare90"] = df.apply(lambda r: calc_aftercare_window_range(r, 61, 90), axis=1)
+        # Map aftercare flags from the pre-aggregated sets
+        df["Aftercare30"] = df[COL_RECORD_ID].isin(ids_30).astype(int)
+        df["Aftercare60"] = df[COL_RECORD_ID].isin(ids_60).astype(int)
+        df["Aftercare90"] = df[COL_RECORD_ID].isin(ids_90).astype(int)
 
         df["Current FY Goal"]        = df[COL_PROGRAM].map(constants.PROGRAM_GOALS)
         df["Next FY Goal"]           = df[COL_PROGRAM].map(constants.NEXT_FY_GRAD_GOALS)
@@ -433,6 +442,7 @@ def run_renew_processing(
                 "Current FY Goal", "Next FY Goal", "Current FY Projection", "Capacity", "Theoretical Maximum",
                 "FY27 Capacity", "FY27 Occupancy Goal"
                 ] + list(constants.ACTUALS_WINDOWS.keys())
+        
         df = df[[c for c in cols if c in df.columns]].copy()
 
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
