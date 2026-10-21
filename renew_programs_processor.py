@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Renew Programs Processing Pipeline
-Processes Graduates, Occupancy, and Retention tabs for Q4 FY26.
+Processes Graduates, Occupancy, Retention, and ECM Clients tabs for Q4 FY26.
 Includes Weekly (FY26+), Monthly, and Quarterly Average tabs for Graduates.
 Retention cohort covers clients starting between 5/1/2026 (1 month prior) and 8/31/2026.
 Includes prior quarter (Q3) retention tracking metrics..
@@ -40,14 +40,15 @@ def run_renew_processing(
     RAW_DATA_HEADER_ROW = 3
     RAW_DATA_START_COL  = 1
 
-    COL_RECORD_ID    = "Record Id_102"
-    COL_NAME         = "Name_2057"
-    COL_PROGRAM      = "Program Enrolling_2091"
-    COL_START_DATE   = "Start Date_2090"
-    COL_EXIT_DATE    = "Exit Date_2100"
-    COL_EXIT_REASON  = "Primary Reason for Exit_2102"
-    COL_CHILD        = "Name of Child_6313"
-    COL_SJ_CASE_MGR  = "San Jose Men Case Managers_4668"
+    COL_RECORD_ID      = "Record Id_102"
+    COL_NAME           = "Name_2057"
+    COL_PROGRAM        = "Program Enrolling_2091"
+    COL_INTERN_PROGRAM = "Intern Program_6619"
+    COL_START_DATE     = "Start Date_2090"
+    COL_EXIT_DATE      = "Exit Date_2100"
+    COL_EXIT_REASON    = "Primary Reason for Exit_2102"
+    COL_CHILD          = "Name of Child_6313"
+    COL_SJ_CASE_MGR    = "San Jose Men Case Managers_4668"
 
     COL_CHECKIN_DATE   = "Checkin Date_6583"
     COL_HOW_CHECKED    = "How Checked_6584"
@@ -163,7 +164,8 @@ def run_renew_processing(
     # 3. Helper Functions
     # =========================================================================
     def assign_city_custom(program_name):
-        if str(program_name).strip() in ["San Jose Women Renew", "House of Grace", "GV Renew"]:
+        prog_str = str(program_name).strip().lower()
+        if any(x in prog_str for x in ["san jose women", "sj wp", "house of grace", "gv renew", "heritage home"]):
             return "San Jose Women"
         return constants.assign_city(program_name)
 
@@ -223,12 +225,6 @@ def run_renew_processing(
             val = row.get("Acquired Sponsor_5137")
             return 1 if str(val).strip().lower() == "yes" else 0
         return np.nan
-
-    def calc_ecm(row):
-        val = row.get(COL_ENGAGEMENT)
-        if pd.notna(val) and str(val).strip().lower() == "enrolled":
-            return 1
-        return 0
 
     def calculate_current_module(row):
         if pd.notna(row.get(COL_EXIT_DATE)):
@@ -382,29 +378,22 @@ def run_renew_processing(
     def process_graduates(df_base):
         df = df_base.copy()
 
-        # -------------------------------------------------------------------------
-        # Step A: Aggregate Aftercare across ALL check-in rows per client ID first
-        # -------------------------------------------------------------------------
         today_ts = pd.Timestamp.now().normalize()
         df["_checkin_dt"] = pd.to_datetime(df[COL_CHECKIN_DATE], errors="coerce")
         df["_days_ago"]   = (today_ts - df["_checkin_dt"]).dt.days
 
-        # Check for valid contact methods (case-insensitive substring match)
         how_checked_series = df[COL_HOW_CHECKED].fillna("").astype(str).str.lower()
         df["_is_valid_method"] = how_checked_series.apply(
             lambda val: any(method in val for method in VALID_HOW_CHECKED)
         )
 
-        # Identify client Record IDs with AT LEAST ONE valid check-in row per window
         mask_valid = df["_is_valid_method"] & df["_checkin_dt"].notna()
         
-        ids_30 = set(df[mask_valid & (df["_days_ago"] >= 0)  & (df["_days_ago"] <= 30)][COL_RECORD_ID])
-        ids_60 = set(df[mask_valid & (df["_days_ago"] >= 31) & (df["_days_ago"] <= 60)][COL_RECORD_ID])
-        ids_90 = set(df[mask_valid & (df["_days_ago"] >= 61) & (df["_days_ago"] <= 90)][COL_RECORD_ID])
+        ids_30     = set(df[mask_valid & (df["_days_ago"] >= 0)  & (df["_days_ago"] <= 30)][COL_RECORD_ID])
+        ids_60     = set(df[mask_valid & (df["_days_ago"] >= 31) & (df["_days_ago"] <= 60)][COL_RECORD_ID])
+        ids_90     = set(df[mask_valid & (df["_days_ago"] >= 61) & (df["_days_ago"] <= 90)][COL_RECORD_ID])
+        ids_91plus = set(df[mask_valid & (df["_days_ago"] >= 91)][COL_RECORD_ID])
 
-        # -------------------------------------------------------------------------
-        # Step B: Filter and Deduplicate to Graduate summary rows
-        # -------------------------------------------------------------------------
         df["_is_grad"] = df[COL_EXIT_REASON].isin(GRAD_REASONS).astype(int)
         df = (df.sort_values(["_is_grad", COL_EXIT_DATE], ascending=[False, False])
                 .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM, COL_START_DATE], keep="first")
@@ -419,10 +408,10 @@ def run_renew_processing(
         df["Month"]           = pd.to_datetime(df[COL_EXIT_DATE], errors="coerce").dt.strftime("%Y-%m-01").fillna("")
         df["Days in Program"] = calc_days_in_program(df)
         
-        # Map aftercare flags from the pre-aggregated sets
-        df["Aftercare30"] = df[COL_RECORD_ID].isin(ids_30).astype(int)
-        df["Aftercare60"] = df[COL_RECORD_ID].isin(ids_60).astype(int)
-        df["Aftercare90"] = df[COL_RECORD_ID].isin(ids_90).astype(int)
+        df["Aftercare30"]     = df[COL_RECORD_ID].isin(ids_30).astype(int)
+        df["Aftercare60"]     = df[COL_RECORD_ID].isin(ids_60).astype(int)
+        df["Aftercare90"]     = df[COL_RECORD_ID].isin(ids_90).astype(int)
+        df["Aftercare91Plus"] = df[COL_RECORD_ID].isin(ids_91plus).astype(int)
 
         df["Current FY Goal"]        = df[COL_PROGRAM].map(constants.PROGRAM_GOALS)
         df["Next FY Goal"]           = df[COL_PROGRAM].map(constants.NEXT_FY_GRAD_GOALS)
@@ -438,7 +427,7 @@ def run_renew_processing(
 
         cols = [COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, "Days in Program", COL_EXIT_REASON,
                 "City", "Year", "Quarter", "Year Q", "Month",
-                "Aftercare30", "Aftercare60", "Aftercare90",
+                "Aftercare30", "Aftercare60", "Aftercare90", "Aftercare91Plus",
                 "Current FY Goal", "Next FY Goal", "Current FY Projection", "Capacity", "Theoretical Maximum",
                 "FY27 Capacity", "FY27 Occupancy Goal"
                 ] + list(constants.ACTUALS_WINDOWS.keys())
@@ -480,21 +469,18 @@ def run_renew_processing(
         df["Next FY Goal"]       = df[COL_PROGRAM].map(constants.NEXT_FY_OCC_GOALS)
         df["Prior FY Occupancy"] = df[COL_PROGRAM].map(constants.OCCUPANCY_PRIOR_FY)
 
-        # Days in Program, Time Window Categorical Column, and universal Current Module calculation
         df["Days in Program"]    = calc_days_in_program(df)
         df["Days(Time Window)"]  = df["Days in Program"].apply(calc_days_time_window)
         df["Current Module"]     = df.apply(calculate_current_module, axis=1)
 
-        # Calculate conditional Spiritual Mentor, AA Sponsor & ECM metrics
         df["Spiritual Mentor"] = df.apply(calc_spiritual_mentor, axis=1)
         df["AA Sponsor"]       = df.apply(calc_aa_sponsor, axis=1)
-        df["ECM?"]             = df.apply(calc_ecm, axis=1)
 
         target_cols = [
             COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, "Days in Program",
             "Days(Time Window)", "City", constants.OCC_PRIOR_LABEL, constants.OCC_CURRENT_LABEL,
             COL_CHILD, "Number of Children", COL_SJ_CASE_MGR, "Current Module",
-            "Spiritual Mentor", "AA Sponsor", COL_ENGAGEMENT, "ECM?"
+            "Spiritual Mentor", "AA Sponsor", COL_ENGAGEMENT
         ] + ALL_MODULE_DATE_COLS + ["Capacity", "Goal", "Next FY Goal", "Prior FY Occupancy"]
 
         df = df[[c for c in target_cols if c in df.columns]].copy()
@@ -611,6 +597,59 @@ def run_renew_processing(
         df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
         return df.reset_index(drop=True)
 
+    def process_ecm_clients(df_mod_raw):
+        df = df_mod_raw.copy()
+        if COL_ENGAGEMENT not in df.columns:
+            return pd.DataFrame()
+
+        # Filter strictly for 'Enrolled' status across all programs
+        is_enrolled = df[COL_ENGAGEMENT].fillna("").astype(str).str.strip().str.lower() == "enrolled"
+        df_ecm = df[is_enrolled].copy()
+
+        # Convert Start Date to datetime for sorting
+        df_ecm["_start_dt"] = pd.to_datetime(df_ecm[COL_START_DATE], errors="coerce")
+
+        # Sort by Start Date descending (newest first) and keep the most recent record per Record ID
+        df_ecm = (
+            df_ecm.sort_values(by="_start_dt", ascending=False)
+            .drop_duplicates(subset=[COL_RECORD_ID], keep="first")
+            .drop(columns=["_start_dt"])
+            .reset_index(drop=True)
+        )
+
+        # Assign City column based on Program Enrolling or Intern Program_6619
+        def assign_ecm_city(row):
+            prog = str(row.get(COL_PROGRAM, "")).strip()
+            intern_prog = str(row.get(COL_INTERN_PROGRAM, "")).strip()
+            
+            prog_lower = prog.lower()
+            intern_lower = intern_prog.lower()
+
+            # First, check Intern Program_6619 if populated or if client is an intern
+            if "intern" in prog_lower or (intern_prog and intern_lower != "nan"):
+                target_str = intern_lower if (intern_prog and intern_lower != "nan") else prog_lower
+                
+                if "chester" in target_str:
+                    return "Chester"
+                elif "oakland" in target_str:
+                    return "Oakland"
+                elif "portland" in target_str:
+                    return "Portland"
+                elif "san jose men" in target_str or "sj men" in target_str or "mp" in target_str:
+                    return "San Jose Men"
+                elif any(x in target_str for x in ["san jose women", "sj women", "wp", "house of grace", "gv", "heritage home"]):
+                    return "San Jose Women"
+
+            # Check for SJ WP Transition Phase or Heritage Home
+            if any(x in prog_lower for x in ["sj wp", "wp transition", "heritage home"]):
+                return "San Jose Women"
+
+            return assign_city_custom(prog)
+
+        df_ecm["City"] = df_ecm.apply(assign_ecm_city, axis=1)
+
+        return df_ecm
+
     # =========================================================================
     # 5. Execute Tab Processing
     # =========================================================================
@@ -622,6 +661,9 @@ def run_renew_processing(
 
     print("Processing Retention...")
     df_ret = process_retention(df_base)
+
+    print("Processing ECM Clients...")
+    df_ecm = process_ecm_clients(df_mod_raw)
 
     # =========================================================================
     # 6. Google Sheets Export
@@ -644,6 +686,7 @@ def run_renew_processing(
     write_tab(spreadsheet, "Renew Graduates", df_grad)
     write_tab(spreadsheet, "Occupancy",       df_occ)
     write_tab(spreadsheet, "Retention",       df_ret)
+    write_tab(spreadsheet, "ECM Clients",     df_ecm)
 
     # =========================================================================
     # 7. Compute & Export Graduates Average Tabs
