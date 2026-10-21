@@ -4,7 +4,7 @@ Renew Programs Processing Pipeline
 Processes Graduates, Occupancy, Retention, and ECM Clients tabs for Q4 FY26.
 Includes Weekly (FY26+), Monthly, and Quarterly Average tabs for Graduates.
 Retention cohort covers clients starting between 5/1/2026 (1 month prior) and 8/31/2026.
-Includes prior quarter (Q3) retention tracking metrics..
+Includes prior quarter (Q3) retention tracking metrics.
 """
 
 import warnings
