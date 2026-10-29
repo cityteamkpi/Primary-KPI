@@ -21,6 +21,13 @@ from drive_utils import download_drive_file, resolve_folder_id, find_file_id, lo
 # Suppress openpyxl warnings regarding styles and validation metadata
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
+# Normalized set of intern program titles (case-insensitive)
+INTERN_PROGRAM_NAMES = {
+    "program graduate intern",
+    "leadership module",
+    "cdac trainee",
+}
+
 MENTOR_PROGRAMS = {
     "Chester Renew", "GV Renew", "Oakland Renew", "Portland Renew", "San Jose Men Renew",
     "Chester Men Turning Point", "Chester Women Turning Point",
@@ -43,7 +50,7 @@ PROGRAM_CATEGORY = {
     "Oakland Men Turning Point": "Men Turning Point",
     "San Jose Men Turning Point": "Men Turning Point",
     "Portland Men Turning Point": "Men Turning Point",
-    # Women Turning Point
+    # Women Turning Point (Mapped San Jose Youth Collective under Women Turning Point / San Jose Women)
     "Chester Women Turning Point": "Women Turning Point",
     "Chester Women Turning Point Number of Children": "Women Turning Point",
     "GV Turning Point": "Women Turning Point",
@@ -63,7 +70,7 @@ PROGRAM_CATEGORY = {
     "GV Women's Forward Number of Children": "Forward",
     "San Jose Women's House of Light": "Forward",
     "San Jose Women's House of Light Number of Children": "Forward",
-    "Oakland Forwad Men": "Forward",
+    "Oakland Forward Men": "Forward",  # Typo corrected: 'Oakland Forwad Men' -> 'Oakland Forward Men'
     "Oakland Forward Women": "Forward",
     "Oakland Forward Women Number of Children": "Forward",
     "Portland Forward": "Forward",
@@ -151,6 +158,10 @@ def run_utilization_processing(
 
     program_counts = df_raw[program_col].astype(str).str.strip().value_counts()
 
+    # Calculate total intern counts matching any variation in INTERN_PROGRAM_NAMES
+    is_intern = df_raw[program_col].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
+    total_intern_count = int(is_intern.sum())
+
     # =========================================================================
     # 4b. Calculate children counts for women's programs
     # =========================================================================
@@ -217,7 +228,13 @@ def run_utilization_processing(
         for program in df_sheet.columns:
             clean_prog = str(program).strip()
             if clean_prog.endswith(" Number of Children"): continue
-            count = int(program_counts.get(clean_prog, 0))
+            
+            # Map intern variations to Program Interns tab column
+            if clean_prog.lower() in INTERN_PROGRAM_NAMES or tab_name == "Program Interns":
+                count = total_intern_count
+            else:
+                count = int(program_counts.get(clean_prog, 0))
+
             df_sheet.loc[today_date, program] = count
             children_col = clean_prog + " Number of Children"
             if clean_prog in WOMEN_PROGRAMS and children_col in df_sheet.columns:

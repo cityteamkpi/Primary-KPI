@@ -27,8 +27,10 @@ OUTPUT_SHEET_NAME = "Alumni KPI - Processed"
 RAW_DATA_HEADER_ROW = 3
 RAW_DATA_START_COL = 1
 
+COL_RECORD_ID = "Record Id_102"
 COL_NAME = "Name_2057"
 COL_PROGRAM = "Program Enrolling_2091"
+COL_INTERN_PROGRAM = "Intern Program_6619"
 COL_START_DATE = "Start Date_2090"
 COL_EXIT_DATE = "Exit Date_2100"
 COL_EXIT_REASON = "Primary Reason for Exit_2102"
@@ -41,53 +43,11 @@ COL_HOW_CHECKED = "How Checked_6584"
 GRAD_REASONS = ["Graduation", "Completer", "Completion of Program"]
 MONTHLY_HOURS = 173.33
 
-INTERN_PROGRAM = "Program Graduate Intern"
-
-# Hardcoded Intern List
-INTERNS = {
-    "John Au",
-    "Anthony Brumley",
-    "Christopher Cajero",
-    "Shawn Cannon Jr.",
-    "Jose Carpio",
-    "Isidro Castro Jr.",
-    "Kayla Chamberlain",
-    "Evans Choi",
-    "Jesus Contreras",
-    "Shea Davies",
-    "Henry Davis",
-    "Tommy Khoa Dinh",
-    "James Donaldson",
-    "April Dorlarque",
-    "Kathleen Erfurt",
-    "Haley Givens",
-    "Pedro Gomez III",
-    "Dwayne Gooden",
-    "Erik Grier",
-    "Jueun Gu",
-    "JASON Herr",
-    "Dennis Hester",
-    "Christopher Hill",
-    "Linden Hyman Jr.",
-    "Robert Ivens",
-    "James Kahoe",
-    "Kyllie Lawson",
-    "Lawrence LeDee",
-    "Baxter Lipscomb",
-    "Richard Lira Jr.",
-    "Buck Loden",
-    "James Lopez",
-    "Gabriel Maldonado",
-    "Catherine Mayshack",
-    "Andrew Murphy",
-    "Denny Nguyen",
-    "Alexandria Nunez",
-    "Johnne Shiheiber",
-    "Veronica Silva Martinez",
-    "Mario Terrigno",
-    "Angelica Tribo",
-    "Jose Varguez",
-    "Joshua West",
+# Intern Program Names Set
+INTERN_PROGRAM_NAMES = {
+    "program graduate intern",
+    "leadership module",
+    "cdac trainee",
 }
 
 def clean_wage(val):
@@ -276,6 +236,66 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
         "Housing Under 30% (Recent)": 0 if recent_under_30 is None else int(recent_under_30),
     }
 
+def process_aftercare_tab(df_raw_parsed):
+    """Processes Aftercare tab strictly for GRADUATED clients exiting from FY24 to present,
+    evaluating ONLY their absolute most recent check-in date.
+    """
+    df = df_raw_parsed.copy()
+    
+    fy24_start = pd.Timestamp("2023-09-01")
+    today_ts = pd.Timestamp.now().normalize()
+    
+    # Strictly filter for clients who GRADUATED and exited from FY24 to present (>= Sept 1, 2023)
+    is_grad = df[COL_EXIT_REASON].isin(GRAD_REASONS)
+    is_fy24_plus = df[COL_EXIT_DATE].notna() & (df[COL_EXIT_DATE] >= fy24_start)
+    
+    df = df[is_grad & is_fy24_plus].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    # Parse checkin date
+    df["_checkin_dt"] = pd.to_datetime(df[COL_CHECKIN], errors="coerce")
+
+    # Isolate ONLY the absolute latest check-in per client (Record ID)
+    df_latest = (
+        df[df["_checkin_dt"].notna()]
+        .sort_values(by=["_checkin_dt", COL_EXIT_DATE], ascending=[False, False])
+        .drop_duplicates(subset=[COL_RECORD_ID], keep="first")
+        .copy()
+    )
+
+    if df_latest.empty:
+        return pd.DataFrame()
+
+    # Calculate days elapsed since the latest check-in
+    df_latest["_days_ago"] = (today_ts - df_latest["_checkin_dt"]).dt.days
+
+    # Assign single mutually exclusive window flag based strictly on the latest check-in
+    df_latest["Aftercare30"]     = (df_latest["_days_ago"] <= 30).astype(int)
+    df_latest["Aftercare60"]     = ((df_latest["_days_ago"] >= 31) & (df_latest["_days_ago"] <= 60)).astype(int)
+    df_latest["Aftercare90"]     = ((df_latest["_days_ago"] >= 61) & (df_latest["_days_ago"] <= 90)).astype(int)
+    df_latest["Aftercare91Plus"] = (df_latest["_days_ago"] >= 91).astype(int)
+
+    # Assign FY and FY Q based on Exit Date
+    df_latest["FY"]   = df_latest[COL_EXIT_DATE].apply(constants.get_fiscal_year)
+    df_latest["FY Q"] = df_latest[COL_EXIT_DATE].apply(
+        lambda d: f"{constants.get_fiscal_year(d) or ''} {constants.get_fiscal_quarter(d) or ''}".strip() if pd.notna(d) else ""
+    )
+
+    # Format date columns to string (YYYY-MM-DD)
+    df_latest[COL_START_DATE] = pd.to_datetime(df_latest[COL_START_DATE], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    df_latest[COL_EXIT_DATE]  = pd.to_datetime(df_latest[COL_EXIT_DATE],  errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    df_latest[COL_CHECKIN]    = pd.to_datetime(df_latest[COL_CHECKIN],    errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+
+    target_cols = [
+        COL_RECORD_ID, COL_NAME, COL_CHECKIN, COL_PROGRAM, COL_INTERN_PROGRAM,
+        COL_START_DATE, COL_EXIT_DATE, "FY", "FY Q",
+        "Aftercare30", "Aftercare60", "Aftercare90", "Aftercare91Plus"
+    ]
+
+    cols_to_use = [c for c in target_cols if c in df_latest.columns]
+    return df_latest[cols_to_use].reset_index(drop=True)
+
 def run_alum_processing(
     input_file=SRC_ALUMNI + ".xlsx",
     output_file=OUTPUT_SHEET_NAME,
@@ -306,6 +326,11 @@ def run_alum_processing(
 
     # 2. Parsing & Dropping Invalid Client Names
     df_raw_parsed = df_raw.dropna(subset=[COL_NAME]).copy()
+    if COL_RECORD_ID not in df_raw_parsed.columns:
+        df_raw_parsed[COL_RECORD_ID] = np.nan
+    if COL_INTERN_PROGRAM not in df_raw_parsed.columns:
+        df_raw_parsed[COL_INTERN_PROGRAM] = np.nan
+
     df_raw_parsed[COL_EXIT_DATE] = pd.to_datetime(df_raw_parsed[COL_EXIT_DATE], errors="coerce")
     df_raw_parsed[COL_CHECKIN] = pd.to_datetime(df_raw_parsed[COL_CHECKIN], errors="coerce")
     if COL_START_DATE in df_raw_parsed.columns:
@@ -409,6 +434,11 @@ def run_alum_processing(
 
     fy_filtered_df = results_df[results_df["Year"] == target_fy_str].copy() if not results_df.empty else pd.DataFrame()
 
+    # Helper function to check if a program is any form of intern program
+    def is_intern_program(prog_val):
+        if pd.isna(prog_val): return False
+        return str(prog_val).strip().lower() in INTERN_PROGRAM_NAMES
+
     # --- Sobriety Tab ---
     df_sobriety = fy_filtered_df.copy()
     if not df_sobriety.empty:
@@ -442,7 +472,7 @@ def run_alum_processing(
     if not fy_filtered_df.empty:
         df_base_housing = fy_filtered_df[
             (fy_filtered_df["is_sober"] == True) &
-            (~fy_filtered_df[COL_NAME].isin(INTERNS))
+            (~fy_filtered_df[COL_PROGRAM].apply(is_intern_program))
         ].copy()
     else:
         df_base_housing = pd.DataFrame()
@@ -467,6 +497,10 @@ def run_alum_processing(
     # --- Detailed Analysis ---
     detailed_df = results_df.sort_values(by=[COL_PROGRAM, COL_NAME]).copy() if not results_df.empty else results_df
 
+    # --- Aftercare Tab ---
+    print("Processing Aftercare Tab (Graduated Clients, Latest Checkin Only)...")
+    df_aftercare = process_aftercare_tab(df_raw_parsed)
+
     # 5. Write Output
     output_file_res = find_file_id(drive_service, output_file, output_folder_id, "application/vnd.google-apps.spreadsheet")
 
@@ -485,6 +519,7 @@ def run_alum_processing(
     write_tab(ss, "Living Wage", df_lw)
     write_tab(ss, "Housing", df_housing)
     write_tab(ss, "Detailed Analysis", detailed_df)
+    write_tab(ss, "Aftercare", df_aftercare)
 
     try:
         ss.del_worksheet(ss.worksheet("Sheet1"))

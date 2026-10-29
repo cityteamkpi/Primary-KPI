@@ -13,6 +13,13 @@ import constants
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
+# Normalized set of intern program titles (case-insensitive)
+INTERN_PROGRAM_NAMES = {
+    "program graduate intern",
+    "leadership module",
+    "cdac trainee",
+}
+
 
 def combine_columns_with_priority(df, col_new, col_old, target_col, win_start, win_end):
     """
@@ -221,10 +228,11 @@ def run_atwork_processing(
 
         start_parsed = df[COL_DATE] if COL_DATE in df.columns else pd.Series(pd.NaT, index=df.index)
 
-        # Vectorized eligibility
+        # Vectorized eligibility with case-insensitive intern program matching
         prog_series   = df[COL_PROG].astype(str).str.strip()
         intern_series = df[COL_INTERN].astype(str).str.strip() if COL_INTERN in df.columns else pd.Series("", index=df.index)
-        is_pgi        = prog_series == "Program Graduate Intern"
+        
+        is_pgi        = prog_series.str.lower().isin(INTERN_PROGRAM_NAMES)
         program_eligible = (
             (~is_pgi & prog_series.isin(VALID_PROGRAMS_IMPACT)) |
             (is_pgi & intern_series.isin(VALID_INTERN_PROGRAMS_IMPACT))

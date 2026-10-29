@@ -16,6 +16,13 @@ import constants
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
+# Normalized set of intern program titles (case-insensitive)
+INTERN_PROGRAM_NAMES = {
+    "program graduate intern",
+    "leadership module",
+    "cdac trainee",
+}
+
 # Map programs to high-level categories
 TP_PROGRAM_CATEGORY = {
     "Chester Men Turning Point": "Men Turning Point",
@@ -92,9 +99,9 @@ def run_turning_point_processing(
     if COL_HOUSING_CHECK in df_base.columns:
         df_base[COL_HOUSING_CHECK] = pd.to_datetime(df_base[COL_HOUSING_CHECK], errors="coerce")
 
-    # Remap Program Graduate Interns to their specific Intern Program
+    # Remap Program Graduate Intern variations to their specific Intern Program
     if COL_INTERN_PROGRAM in df_base.columns:
-        is_intern = df_base[COL_PROGRAM] == "Program Graduate Intern"
+        is_intern = df_base[COL_PROGRAM].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
         df_base.loc[is_intern, COL_PROGRAM] = df_base.loc[is_intern, COL_INTERN_PROGRAM].apply(match_program)
 
     df_base = df_base[df_base[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)
@@ -209,7 +216,7 @@ def run_turning_point_processing(
             df[COL_HOUSING_CHECK] = pd.to_datetime(df[COL_HOUSING_CHECK], errors="coerce")
 
         if COL_INTERN_PROGRAM in df.columns:
-            is_intern = df[COL_PROGRAM] == "Program Graduate Intern"
+            is_intern = df[COL_PROGRAM].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
             df.loc[is_intern, COL_PROGRAM] = df.loc[is_intern, COL_INTERN_PROGRAM].apply(match_program)
 
         df = df[df[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)

@@ -17,6 +17,13 @@ import constants
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
+# Normalized set of intern program titles (case-insensitive)
+INTERN_PROGRAM_NAMES = {
+    "program graduate intern",
+    "leadership module",
+    "cdac trainee",
+}
+
 # Category Mapping for Renew Programs
 RENEW_PROGRAM_CATEGORY = {
     "Chester Renew": "Renew",
@@ -53,10 +60,7 @@ def run_renew_processing(
     COL_CHECKIN_DATE   = "Checkin Date_6583"
     COL_HOW_CHECKED    = "How Checked_6584"
     COL_ENGAGEMENT     = "Status of Member Engagement_6386"
-    VALID_HOW_CHECKED  = [
-        "email", "in-person", "jail roster", "telephone", "text", "text message",
-        "co-worker", "reliable source", "reliable source/alumni source", "alumni source"
-    ]
+    COL_SM_START_DATE  = "Start Date for Mentoring_4365"
 
     # Module Mapping across City Locations
     CITY_MODULE_MAP = {
@@ -149,8 +153,8 @@ def run_renew_processing(
     df_mod_clean = df_mod_raw.drop(columns=dup_cols)
     df_raw = df_raw.merge(df_mod_clean, on=COL_RECORD_ID, how="left")
 
-    # Ensure required checkin & indicator columns exist
-    for col in ALL_MODULE_DATE_COLS + [COL_CHECKIN_DATE, COL_HOW_CHECKED, COL_ENGAGEMENT, "Acquired Spiritual Mentor_5136", "Acquired Sponsor_5137"]:
+    # Ensure required checkin, spiritual mentor & indicator columns exist
+    for col in ALL_MODULE_DATE_COLS + [COL_CHECKIN_DATE, COL_HOW_CHECKED, COL_ENGAGEMENT, COL_SM_START_DATE, "Acquired Spiritual Mentor_5136", "Acquired Sponsor_5137"]:
         if col not in df_raw.columns:
             df_raw[col] = np.nan
 
@@ -165,7 +169,7 @@ def run_renew_processing(
     # =========================================================================
     def assign_city_custom(program_name):
         prog_str = str(program_name).strip().lower()
-        if any(x in prog_str for x in ["san jose women", "sj wp", "house of grace", "gv renew", "heritage home"]):
+        if any(x in prog_str for x in ["san jose women", "sj wp", "house of grace", "gv renew", "heritage home", "san jose youth"]):
             return "San Jose Women"
         return constants.assign_city(program_name)
 
@@ -225,6 +229,35 @@ def run_renew_processing(
             val = row.get("Acquired Sponsor_5137")
             return 1 if str(val).strip().lower() == "yes" else 0
         return np.nan
+
+    def calc_sm_on_or_before_mod2(row):
+        sm_start_val = row.get(COL_SM_START_DATE)
+        if pd.isna(sm_start_val):
+            return 0
+        sm_start_dt = pd.to_datetime(sm_start_val, errors="coerce")
+        if pd.isna(sm_start_dt):
+            return 0
+
+        city = row.get("City")
+        mod_cols = CITY_MODULE_MAP.get(city, [])
+        
+        mod2_col = None
+        for num, col_name in mod_cols:
+            if num == 2:
+                mod2_col = col_name
+                break
+
+        if not mod2_col:
+            return 0
+
+        mod2_val = row.get(mod2_col)
+        if pd.isna(mod2_val):
+            return 0
+        mod2_dt = pd.to_datetime(mod2_val, errors="coerce")
+        if pd.isna(mod2_dt):
+            return 0
+
+        return 1 if sm_start_dt <= mod2_dt else 0
 
     def calculate_current_module(row):
         if pd.notna(row.get(COL_EXIT_DATE)):
@@ -378,26 +411,10 @@ def run_renew_processing(
     def process_graduates(df_base):
         df = df_base.copy()
 
-        today_ts = pd.Timestamp.now().normalize()
-        df["_checkin_dt"] = pd.to_datetime(df[COL_CHECKIN_DATE], errors="coerce")
-        df["_days_ago"]   = (today_ts - df["_checkin_dt"]).dt.days
-
-        how_checked_series = df[COL_HOW_CHECKED].fillna("").astype(str).str.lower()
-        df["_is_valid_method"] = how_checked_series.apply(
-            lambda val: any(method in val for method in VALID_HOW_CHECKED)
-        )
-
-        mask_valid = df["_is_valid_method"] & df["_checkin_dt"].notna()
-        
-        ids_30     = set(df[mask_valid & (df["_days_ago"] >= 0)  & (df["_days_ago"] <= 30)][COL_RECORD_ID])
-        ids_60     = set(df[mask_valid & (df["_days_ago"] >= 31) & (df["_days_ago"] <= 60)][COL_RECORD_ID])
-        ids_90     = set(df[mask_valid & (df["_days_ago"] >= 61) & (df["_days_ago"] <= 90)][COL_RECORD_ID])
-        ids_91plus = set(df[mask_valid & (df["_days_ago"] >= 91)][COL_RECORD_ID])
-
         df["_is_grad"] = df[COL_EXIT_REASON].isin(GRAD_REASONS).astype(int)
         df = (df.sort_values(["_is_grad", COL_EXIT_DATE], ascending=[False, False])
                 .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM, COL_START_DATE], keep="first")
-                .drop(columns=["_is_grad", "_checkin_dt", "_days_ago", "_is_valid_method"]))
+                .drop(columns=["_is_grad"]))
         
         df = df[df[COL_EXIT_DATE].notna() & df[COL_EXIT_REASON].isin(GRAD_REASONS)].copy()
 
@@ -407,11 +424,6 @@ def run_renew_processing(
         df["Year Q"]          = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
         df["Month"]           = pd.to_datetime(df[COL_EXIT_DATE], errors="coerce").dt.strftime("%Y-%m-01").fillna("")
         df["Days in Program"] = calc_days_in_program(df)
-        
-        df["Aftercare30"]     = df[COL_RECORD_ID].isin(ids_30).astype(int)
-        df["Aftercare60"]     = df[COL_RECORD_ID].isin(ids_60).astype(int)
-        df["Aftercare90"]     = df[COL_RECORD_ID].isin(ids_90).astype(int)
-        df["Aftercare91Plus"] = df[COL_RECORD_ID].isin(ids_91plus).astype(int)
 
         df["Current FY Goal"]        = df[COL_PROGRAM].map(constants.PROGRAM_GOALS)
         df["Next FY Goal"]           = df[COL_PROGRAM].map(constants.NEXT_FY_GRAD_GOALS)
@@ -427,7 +439,6 @@ def run_renew_processing(
 
         cols = [COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, "Days in Program", COL_EXIT_REASON,
                 "City", "Year", "Quarter", "Year Q", "Month",
-                "Aftercare30", "Aftercare60", "Aftercare90", "Aftercare91Plus",
                 "Current FY Goal", "Next FY Goal", "Current FY Projection", "Capacity", "Theoretical Maximum",
                 "FY27 Capacity", "FY27 Occupancy Goal"
                 ] + list(constants.ACTUALS_WINDOWS.keys())
@@ -473,20 +484,22 @@ def run_renew_processing(
         df["Days(Time Window)"]  = df["Days in Program"].apply(calc_days_time_window)
         df["Current Module"]     = df.apply(calculate_current_module, axis=1)
 
-        df["Spiritual Mentor"] = df.apply(calc_spiritual_mentor, axis=1)
-        df["AA Sponsor"]       = df.apply(calc_aa_sponsor, axis=1)
+        df["Spiritual Mentor"]          = df.apply(calc_spiritual_mentor, axis=1)
+        df["SM on or before Mod2?"]     = df.apply(calc_sm_on_or_before_mod2, axis=1)
+        df["AA Sponsor"]                = df.apply(calc_aa_sponsor, axis=1)
 
         target_cols = [
             COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, "Days in Program",
             "Days(Time Window)", "City", constants.OCC_PRIOR_LABEL, constants.OCC_CURRENT_LABEL,
             COL_CHILD, "Number of Children", COL_SJ_CASE_MGR, "Current Module",
-            "Spiritual Mentor", "AA Sponsor", COL_ENGAGEMENT
+            COL_SM_START_DATE, "Spiritual Mentor", "SM on or before Mod2?", "AA Sponsor", COL_ENGAGEMENT
         ] + ALL_MODULE_DATE_COLS + ["Capacity", "Goal", "Next FY Goal", "Prior FY Occupancy"]
 
         df = df[[c for c in target_cols if c in df.columns]].copy()
 
-        df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
-        df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
+        df[COL_START_DATE]    = fmt_date(df, COL_START_DATE)
+        df[COL_EXIT_DATE]     = fmt_date(df, COL_EXIT_DATE)
+        df[COL_SM_START_DATE] = fmt_date(df, COL_SM_START_DATE)
 
         for date_col in ALL_MODULE_DATE_COLS:
             if date_col in df.columns:
@@ -617,7 +630,7 @@ def run_renew_processing(
             .reset_index(drop=True)
         )
 
-        # Assign City column based on Program Enrolling or Intern Program_6619
+        # Assign City column based on Program Enrolling or Intern Program_6619 using INTERN_PROGRAM_NAMES
         def assign_ecm_city(row):
             prog = str(row.get(COL_PROGRAM, "")).strip()
             intern_prog = str(row.get(COL_INTERN_PROGRAM, "")).strip()
@@ -625,8 +638,8 @@ def run_renew_processing(
             prog_lower = prog.lower()
             intern_lower = intern_prog.lower()
 
-            # First, check Intern Program_6619 if populated or if client is an intern
-            if "intern" in prog_lower or (intern_prog and intern_lower != "nan"):
+            # First, check if enrolled program matches any intern program title or if intern program field is populated
+            if prog_lower in INTERN_PROGRAM_NAMES or "intern" in prog_lower or (intern_prog and intern_lower != "nan"):
                 target_str = intern_lower if (intern_prog and intern_lower != "nan") else prog_lower
                 
                 if "chester" in target_str:
@@ -637,11 +650,11 @@ def run_renew_processing(
                     return "Portland"
                 elif "san jose men" in target_str or "sj men" in target_str or "mp" in target_str:
                     return "San Jose Men"
-                elif any(x in target_str for x in ["san jose women", "sj women", "wp", "house of grace", "gv", "heritage home"]):
+                elif any(x in target_str for x in ["san jose women", "sj women", "wp", "house of grace", "gv", "heritage home", "san jose youth"]):
                     return "San Jose Women"
 
-            # Check for SJ WP Transition Phase or Heritage Home
-            if any(x in prog_lower for x in ["sj wp", "wp transition", "heritage home"]):
+            # Check for SJ WP Transition Phase, Heritage Home, or Youth Collective
+            if any(x in prog_lower for x in ["sj wp", "wp transition", "heritage home", "san jose youth"]):
                 return "San Jose Women"
 
             return assign_city_custom(prog)

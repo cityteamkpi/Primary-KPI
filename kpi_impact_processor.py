@@ -13,6 +13,14 @@ import constants
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
+# Normalized set of intern program titles (case-insensitive)
+INTERN_PROGRAM_NAMES = {
+    "program graduate intern",
+    "leadership module",
+    "cdac trainee",
+}
+
+
 def run_kpi_impact_processing(
     baptisms_input_file       = 'CityTeam Baptisms.xlsx',
     mentorship_input_file     = 'Mentorship.xlsx',
@@ -155,15 +163,18 @@ def run_kpi_impact_processing(
             print(f"   Warning: No data remaining after date filter.")
             return pd.DataFrame()
 
-        # Intern priority flag
+        # Intern priority flag with case-insensitive matching
         df["_intern_priority"] = 0
-        if COL_INTERN in df.columns:
-            is_intern = df[COL_PROGRAM] == "Program Graduate Intern"
+        if COL_INTERN in df.columns and COL_PROGRAM in df.columns:
+            is_intern = df[COL_PROGRAM].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
             df.loc[is_intern & df[COL_INTERN].notna(), "_intern_priority"] = 1
             df.loc[is_intern, COL_PROGRAM] = df.loc[is_intern, COL_INTERN]
             before = len(df)
-            df = df[df[COL_PROGRAM] != "Program Graduate Intern"].reset_index(drop=True)
-            print(f"   Remapped/excluded PGI: {before - len(df)} rows removed")
+            
+            # Exclude remaining intern program entries
+            is_still_intern = df[COL_PROGRAM].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
+            df = df[~is_still_intern].reset_index(drop=True)
+            print(f"   Remapped/excluded intern programs: {before - len(df)} rows removed")
 
         # Remap Forward programs → Renew programs
         df[COL_PROGRAM] = df[COL_PROGRAM].apply(
@@ -196,7 +207,7 @@ def run_kpi_impact_processing(
             df = df.sort_values(date_col).reset_index(drop=True)
             print(f"   Dedup ({direction} date): {before} -> {len(df)} rows ({before - len(df)} removed)")
         else:
-            df = df.drop(columns=["_intern_priority"])
+            df = df.drop(columns=["_intern_priority"], errors="ignore")
 
         # Ensure Actuals are int
         for k in actuals_cols:
