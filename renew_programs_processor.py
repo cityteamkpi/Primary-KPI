@@ -34,6 +34,22 @@ RENEW_PROGRAM_CATEGORY = {
     "San Jose Women Renew": "Renew",
 }
 
+def get_intern_program_value(row):
+    """
+    Prioritization Rule:
+    - If either Post Graduate or Intern Program is null, prioritize non-null.
+    - If they contradict (both populated and different), prioritize Post Graduate.
+    """
+    post_grad = row.get("Post Graduate Program Association_6619")
+    intern_prog = row.get("Intern Program_6619")
+
+    post_str = str(post_grad).strip() if pd.notna(post_grad) and str(post_grad).strip().lower() != "nan" else None
+    intern_str = str(intern_prog).strip() if pd.notna(intern_prog) and str(intern_prog).strip().lower() != "nan" else None
+
+    if post_str:
+        return post_str
+    return intern_str
+
 def run_renew_processing(
     input_file="Renew Programs Report.xlsx",
     module_file="Renew Module Progress.xlsx",
@@ -50,7 +66,6 @@ def run_renew_processing(
     COL_RECORD_ID      = "Record Id_102"
     COL_NAME           = "Name_2057"
     COL_PROGRAM        = "Program Enrolling_2091"
-    COL_INTERN_PROGRAM = "Intern Program_6619"
     COL_START_DATE     = "Start Date_2090"
     COL_EXIT_DATE      = "Exit Date_2100"
     COL_EXIT_REASON    = "Primary Reason for Exit_2102"
@@ -147,6 +162,10 @@ def run_renew_processing(
     print(f"Downloading {module_file}...")
     fh_mod, _, _ = download_drive_file(drive_service, module_file, input_folder_id)
     df_mod_raw = load_raw(fh_mod, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
+
+    # Compute prioritized intern column across datasets
+    for df_target in [df_raw, df_mod_raw]:
+        df_target["_INTERN_RESOLVED"] = df_target.apply(get_intern_program_value, axis=1)
 
     # Merge Module Progress data into Raw Data using Record Id_102
     dup_cols = [c for c in df_mod_raw.columns if c in df_raw.columns and c != COL_RECORD_ID]
@@ -475,7 +494,7 @@ def run_renew_processing(
             return len([p for p in parts if p.strip()])
             
         df["Number of Children"] = df.apply(count_kids_only, axis=1)
-        df["Capacity"]           = df[COL_PROGRAM].map(constants.OCCUPANCY_CAPACITY)
+        df["Capacity"]           = df[COL_PROGRAM].map(constants.PROGRAM_CAPACITY)
         df["Goal"]               = df[COL_PROGRAM].map(constants.OCCUPANCY_GOAL)
         df["Next FY Goal"]       = df[COL_PROGRAM].map(constants.NEXT_FY_OCC_GOALS)
         df["Prior FY Occupancy"] = df[COL_PROGRAM].map(constants.OCCUPANCY_PRIOR_FY)
@@ -630,15 +649,15 @@ def run_renew_processing(
             .reset_index(drop=True)
         )
 
-        # Assign City column based on Program Enrolling or Intern Program_6619 using INTERN_PROGRAM_NAMES
+        # Assign City column based on Program Enrolling or Prioritized Intern Program Column
         def assign_ecm_city(row):
             prog = str(row.get(COL_PROGRAM, "")).strip()
-            intern_prog = str(row.get(COL_INTERN_PROGRAM, "")).strip()
+            intern_prog = str(row.get("_INTERN_RESOLVED", "")).strip()
             
             prog_lower = prog.lower()
             intern_lower = intern_prog.lower()
 
-            # First, check if enrolled program matches any intern program title or if intern program field is populated
+            # Check if enrolled program matches intern titles or if intern/post-grad field is populated
             if prog_lower in INTERN_PROGRAM_NAMES or "intern" in prog_lower or (intern_prog and intern_lower != "nan"):
                 target_str = intern_lower if (intern_prog and intern_lower != "nan") else prog_lower
                 

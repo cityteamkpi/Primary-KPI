@@ -40,6 +40,22 @@ TP_PROGRAM_CATEGORY = {
     "Chester Turning Point": "Turning Point",
 }
 
+def get_intern_program_value(row):
+    """
+    Prioritization Rule:
+    - If either Post Graduate or Intern Program is null, prioritize non-null.
+    - If they contradict (both populated and different), prioritize Post Graduate.
+    """
+    post_grad = row.get("Post Graduate Program Association_6619")
+    intern_prog = row.get("Intern Program_6619")
+
+    post_str = str(post_grad).strip() if pd.notna(post_grad) and str(post_grad).strip().lower() != "nan" else None
+    intern_str = str(intern_prog).strip() if pd.notna(intern_prog) and str(intern_prog).strip().lower() != "nan" else None
+
+    if post_str:
+        return post_str
+    return intern_str
+
 def run_turning_point_processing(
     input_file="Turning Point Report.xlsx",
     output_file="Turning Point Report - Processed",
@@ -61,7 +77,6 @@ def run_turning_point_processing(
     COL_HOUSED_OLD     = "Successfully Housed (Is Housing Healthy?)_4368"
     COL_HOUSED_NEW     = "Successfully Housed_7011"
     COL_HOUSING_CHECK  = "Date of Housing Check_5141"
-    COL_INTERN_PROGRAM = "Intern Program_6619"
 
     PROGRAMS_TO_INCLUDE = [
         "Heritage Home", "Oakland Women Turning Point", "San Jose Men Turning Point",
@@ -99,10 +114,12 @@ def run_turning_point_processing(
     if COL_HOUSING_CHECK in df_base.columns:
         df_base[COL_HOUSING_CHECK] = pd.to_datetime(df_base[COL_HOUSING_CHECK], errors="coerce")
 
+    # Compute prioritized intern column
+    df_base["_INTERN_RESOLVED"] = df_base.apply(get_intern_program_value, axis=1)
+
     # Remap Program Graduate Intern variations to their specific Intern Program
-    if COL_INTERN_PROGRAM in df_base.columns:
-        is_intern = df_base[COL_PROGRAM].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
-        df_base.loc[is_intern, COL_PROGRAM] = df_base.loc[is_intern, COL_INTERN_PROGRAM].apply(match_program)
+    is_intern = df_base[COL_PROGRAM].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
+    df_base.loc[is_intern, COL_PROGRAM] = df_base.loc[is_intern, "_INTERN_RESOLVED"].apply(match_program)
 
     df_base = df_base[df_base[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)
 
@@ -215,9 +232,10 @@ def run_turning_point_processing(
         if COL_HOUSING_CHECK in df.columns:
             df[COL_HOUSING_CHECK] = pd.to_datetime(df[COL_HOUSING_CHECK], errors="coerce")
 
-        if COL_INTERN_PROGRAM in df.columns:
-            is_intern = df[COL_PROGRAM].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
-            df.loc[is_intern, COL_PROGRAM] = df.loc[is_intern, COL_INTERN_PROGRAM].apply(match_program)
+        df["_INTERN_RESOLVED"] = df.apply(get_intern_program_value, axis=1)
+
+        is_intern = df[COL_PROGRAM].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
+        df.loc[is_intern, COL_PROGRAM] = df.loc[is_intern, "_INTERN_RESOLVED"].apply(match_program)
 
         df = df[df[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)
 

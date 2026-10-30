@@ -50,7 +50,7 @@ PROGRAM_CATEGORY = {
     "Oakland Men Turning Point": "Men Turning Point",
     "San Jose Men Turning Point": "Men Turning Point",
     "Portland Men Turning Point": "Men Turning Point",
-    # Women Turning Point (Mapped San Jose Youth Collective under Women Turning Point / San Jose Women)
+    # Women Turning Point
     "Chester Women Turning Point": "Women Turning Point",
     "Chester Women Turning Point Number of Children": "Women Turning Point",
     "GV Turning Point": "Women Turning Point",
@@ -70,7 +70,7 @@ PROGRAM_CATEGORY = {
     "GV Women's Forward Number of Children": "Forward",
     "San Jose Women's House of Light": "Forward",
     "San Jose Women's House of Light Number of Children": "Forward",
-    "Oakland Forward Men": "Forward",  # Typo corrected: 'Oakland Forwad Men' -> 'Oakland Forward Men'
+    "Oakland Forward Men": "Forward",
     "Oakland Forward Women": "Forward",
     "Oakland Forward Women Number of Children": "Forward",
     "Portland Forward": "Forward",
@@ -84,6 +84,22 @@ PROGRAM_CATEGORY = {
     "Elevate Mt View Level 1": "Elevate",
     "Elevate Redwood City Level 1": "Elevate",
 }
+
+def get_intern_program_value(row):
+    """
+    Prioritization Rule:
+    - If either Post Graduate or Intern Program is null, prioritize non-null.
+    - If they contradict (both populated and different), prioritize Post Graduate.
+    """
+    post_grad = row.get("Post Graduate Program Association_6619")
+    intern_prog = row.get("Intern Program_6619")
+
+    post_str = str(post_grad).strip() if pd.notna(post_grad) and str(post_grad).strip().lower() != "nan" else None
+    intern_str = str(intern_prog).strip() if pd.notna(intern_prog) and str(intern_prog).strip().lower() != "nan" else None
+
+    if post_str:
+        return post_str
+    return intern_str
 
 def run_utilization_processing(
     input_report_file       = 'Clients in All Programs.xlsx',
@@ -118,6 +134,9 @@ def run_utilization_processing(
     print(f"Downloading {input_report_file}...")
     report_stream, _, _ = download_drive_file(drive_service, input_report_file, input_folder_id)
     df_raw = load_raw(report_stream, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
+
+    # Calculate prioritized intern column
+    df_raw["_INTERN_RESOLVED"] = df_raw.apply(get_intern_program_value, axis=1)
 
     # =========================================================================
     # 2b. Download Mentorship file

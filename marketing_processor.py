@@ -19,6 +19,29 @@ INTERN_PROGRAM_NAMES = {
     "cdac trainee",
 }
 
+# Industry Certificate Date Columns for Credentials Attained (Row 29)
+IC_DATE_COLS = [
+    "Electrical Trainee Card Date_5727", "NCCER Date_5728",
+    "Blueprint Reading Date_6785", "Forklift Operator Date_5106",
+    "OSHA10 Date_5118", "MA Date_5115",
+    "Google IT Support Certificate Date_5107", "HAZWOPER Date_5109",
+    "HAZMAT Date_5108", "CPR/FA/AED Date_5105", "CADC Date_5789",
+    "ServSafe Food Manager Date_5126", "ServSafe Food Handler Date_5125",
+    "Material Handling Date_5116",
+    "Multi-Core Craft Curriculum Completion Date_5117",
+    "RADT Date_5121", "HVAC Date_5113", "CDL Date_6104",
+    "CompTIA and/or A+ Date_5104", "OTHER Date_5119",
+    "Guard Card Date_6561", "TWIC Date_6631",
+    "Google Automate Cybersecurity w/Python Date_6273",
+    "CNC Machining Date_5103", "Confined Space Date_6788",
+    "DVAT Date_6791", "Fundamentals of Construction Date_6790",
+    "HR Associate Date_6789", "Intuit Bookkeeping Date_6105",
+    "Massage Therapy Cert Date_7032", "Peer Support Date_7031",
+    "Record Expungement Date_6787",
+    "Record Expungement Attorney Consultation Date_6879",
+    "Traffic Control Date_6786", "Certificate/License Date"
+]
+
 def log(msg):
     print(msg, flush=True)
 
@@ -35,7 +58,7 @@ FY_CONFIGS = {
     },
     "FY27": {
         "start": pd.Timestamp("2026-09-01"),
-        "end": pd.Timestamp("2027-08-31"),
+        "end": pd.Timestamp.now().normalize(),  # FY27 To-Date
         "sheet_name": "Current Fiscal Year To-Date"
     }
 }
@@ -67,7 +90,7 @@ PROGRAM_MAP = {
     },
     "San Jose Women": {
         "renew": ["GV Renew", "House of Grace"],
-        "tp": ["GV Turning Point", "Heritage Home"],
+        "tp": ["GV Turning Point", "Heritage Home", "San Jose Youth Collective"],
         "fwd_intern": ["GV Women's Forward"]
     },
     "Oakland Men": {
@@ -143,14 +166,41 @@ ROW_HOUSING_BURDEN_1YR             = 34
 ROW_WAGE_INCREASE                  = 35
 
 
+def get_intern_program_value(row, col_map):
+    """
+    Evaluates both 'Post Graduate Program Association_6619' and 'Intern Program_6619':
+    - If either field is missing or NaN, prioritizes the non-null value.
+    - If both fields are populated and contain different values, strictly prioritizes 'Post Graduate Program Association_6619'.
+    """
+    col_pg = next((col_map[c] for c in col_map if "post graduate program association_6619" in c or "post graduate program association" in c), None)
+    col_intern = next((col_map[c] for c in col_map if "intern program_6619" in c or "intern program" in c), None)
+
+    val_pg = str(row[col_pg]).strip() if col_pg and pd.notna(row[col_pg]) else ""
+    val_intern = str(row[col_intern]).strip() if col_intern and pd.notna(row[col_intern]) else ""
+
+    invalid_tokens = {"", "nan", "none", "nat", "<na>"}
+
+    pg_valid = val_pg if val_pg.lower() not in invalid_tokens else None
+    intern_valid = val_intern if val_intern.lower() not in invalid_tokens else None
+
+    if pg_valid and intern_valid:
+        return pg_valid
+    if pg_valid:
+        return pg_valid
+    if intern_valid:
+        return intern_valid
+
+    return ""
+
+
 def count_fy_distinct_enrollments(
     df, 
     fy_start, 
     fy_end, 
     prog_list, 
-    id_col_candidates=["record id_102", "record id_2086", "record id"], 
+    id_col_candidates=["record id_102", "record id_2086", "record id_152", "record id"], 
     date_col_candidates=["start date_2090", "start date"], 
-    prog_col_candidates=["program enrolling_2091", "program enrolling", "program", "intern program"]
+    prog_col_candidates=["program enrolling_2091", "program enrolling", "program"]
 ):
     if df.empty or not prog_list:
         return 0
@@ -169,29 +219,29 @@ def count_fy_distinct_enrollments(
     if df_fy.empty:
         return 0
 
-    # Case-insensitive program matching with INTERN_PROGRAM_NAMES support
     prog_set_lower = {str(p).strip().lower() for p in prog_list}
-    df_prog = df_fy[df_fy[prog_col].astype(str).str.strip().str.lower().isin(prog_set_lower)].copy()
+
+    # Derive unified program name considering primary program and dual intern fallback columns
+    def resolve_row_program(row):
+        primary_prog = str(row[prog_col]).strip() if pd.notna(row[prog_col]) else ""
+        intern_fallback = get_intern_program_value(row, col_map)
+        if primary_prog.lower() in INTERN_PROGRAM_NAMES and intern_fallback:
+            return intern_fallback
+        return primary_prog
+
+    df_fy["_resolved_program"] = df_fy.apply(resolve_row_program, axis=1)
+    df_prog = df_fy[df_fy["_resolved_program"].astype(str).str.strip().str.lower().isin(prog_set_lower)].copy()
     if df_prog.empty:
         return 0
 
-    if id_col:
-        valid_records = df_prog.dropna(subset=[id_col, date_col, prog_col])
-        return len(valid_records[[id_col, date_col, prog_col]].drop_duplicates())
+    # DEDUPLICATION: Count unique individuals (Record ID) served during this Fiscal Year
+    if id_col and id_col in df_prog.columns:
+        return int(df_prog[id_col].dropna().nunique())
 
     return len(df_prog)
 
 
-def calculate_nights_of_shelter(
-    df, 
-    prog_list, 
-    fy_start, 
-    fy_end, 
-    id_col_cand=["record id_102", "record id_2086", "record id"],
-    start_col_cand=["start date_2090", "start date"], 
-    exit_col_cand=["exit date_2100", "exit date"], 
-    prog_col_cand=["program enrolling_2091", "program enrolling", "program"]
-):
+def calculate_nights_of_shelter(df, prog_list, fy_start, fy_end, id_col_cand=["record id_102", "record id_2086", "record id"], start_col_cand=["start date_2090", "start date"], exit_col_cand=["exit date_2100", "exit date"], prog_col_cand=["program enrolling_2091", "program enrolling", "program"]):
     if df.empty or not prog_list:
         return 0
 
@@ -227,17 +277,7 @@ def calculate_nights_of_shelter(
     return int(nights.sum())
 
 
-def calculate_case_management_hours(
-    df, 
-    prog_list, 
-    fy_start, 
-    fy_end, 
-    is_chester=False,
-    id_col_cand=["record id_102", "record id_2086", "record id"],
-    start_col_cand=["start date_2090", "start date"], 
-    exit_col_cand=["exit date_2100", "exit date"], 
-    prog_col_cand=["program enrolling_2091", "program enrolling", "program"]
-):
+def calculate_case_management_hours(df, prog_list, fy_start, fy_end, is_chester=False, id_col_cand=["record id_102", "record id_2086", "record id"], start_col_cand=["start date_2090", "start date"], exit_col_cand=["exit date_2100", "exit date"], prog_col_cand=["program enrolling_2091", "program enrolling", "program"]):
     if df.empty or not prog_list:
         return 0
 
@@ -276,24 +316,62 @@ def calculate_case_management_hours(
     return int(round((weeks * multiplier).sum()))
 
 
-def count_fy_dates(df, date_col_name, prog_list, fy_start, fy_end, prog_col_candidates=["program enrolling_2091", "program enrolling", "program", "intern program"]):
+def count_atwork_dates(
+    df, 
+    date_col_names, 
+    prog_list, 
+    fy_start, 
+    fy_end, 
+    id_col_candidates=["record id_152", "record id_102", "record id_2086", "record id"],
+    prog_col_candidates=["program enrolling_2091", "program enrolling", "program"]
+):
     if df.empty or not prog_list:
         return 0
-    
-    col_map = {str(c).lower().strip(): c for c in df.columns}
-    date_col = col_map.get(str(date_col_name).lower().strip())
-    prog_col = next((col_map[cand] for cand in prog_col_candidates if cand in col_map), None)
 
-    if not date_col or not prog_col:
+    col_map = {str(c).lower().strip(): c for c in df.columns}
+    prog_col = next((col_map[cand] for cand in prog_col_candidates if cand in col_map), None)
+    id_col = next((col_map[cand] for cand in id_col_candidates if cand in col_map), None)
+
+    if not prog_col:
         return 0
 
     prog_set_lower = {str(p).strip().lower() for p in prog_list}
-    df_sub = df[df[prog_col].astype(str).str.strip().str.lower().isin(prog_set_lower)].copy()
+
+    # Resolve intern fallback dual columns
+    def resolve_row_program(row):
+        primary_prog = str(row[prog_col]).strip() if pd.notna(row[prog_col]) else ""
+        intern_fallback = get_intern_program_value(row, col_map)
+        if primary_prog.lower() in INTERN_PROGRAM_NAMES and intern_fallback:
+            return intern_fallback
+        return primary_prog
+
+    df["_resolved_program"] = df.apply(resolve_row_program, axis=1)
+    df_sub = df[df["_resolved_program"].astype(str).str.strip().str.lower().isin(prog_set_lower)].copy()
     if df_sub.empty:
         return 0
 
-    dates = pd.to_datetime(df_sub[date_col], errors="coerce")
-    return int(((dates >= fy_start) & (dates <= fy_end)).sum())
+    if isinstance(date_col_names, str):
+        date_col_names = [date_col_names]
+
+    matched_cols = [col_map[c.lower().strip()] for c in date_col_names if c.lower().strip() in col_map]
+    if not matched_cols:
+        return 0
+
+    # Build mask for rows where AT LEAST ONE specified date falls in the FY window
+    in_window_mask = pd.Series(False, index=df_sub.index)
+    for col in matched_cols:
+        dates = pd.to_datetime(df_sub[col], errors="coerce")
+        in_window_mask |= ((dates >= fy_start) & (dates <= fy_end))
+
+    df_valid = df_sub[in_window_mask]
+    if df_valid.empty:
+        return 0
+
+    # DEDUPLICATION: Count distinct clients if ID column exists
+    if id_col and id_col in df_valid.columns:
+        return int(df_valid[id_col].dropna().nunique())
+
+    return len(df_valid)
 
 
 def thread_safe_download(task):
@@ -319,8 +397,7 @@ def process_fiscal_year(fy_key, fy_info, gc, dfs):
         renew_progs = PROGRAM_MAP[loc_name]["renew"]
         tp_progs = PROGRAM_MAP[loc_name]["tp"]
         fwd_intern_progs = PROGRAM_MAP[loc_name]["fwd_intern"]
-        
-        # Include all intern program variations in the fwd_intern_all program list
+
         intern_variations = list(INTERN_PROGRAM_NAMES)
         fwd_intern_all = fwd_intern_progs + intern_variations if fwd_intern_progs else []
         all_progs = renew_progs + tp_progs + fwd_intern_all
@@ -329,13 +406,11 @@ def process_fiscal_year(fy_key, fy_info, gc, dfs):
         df_res_raw_combined = pd.concat([dfs["renew_raw"], dfs["tp_raw"]], ignore_index=True)
 
         # ----------------------------------------------------
-        # ROWS 5-6: ENROLLMENTS
+        # ROWS 5-6: ENROLLMENTS (Deduplicated Individuals Served)
         # ----------------------------------------------------
-        # Row 5: Residential Program New Adult Enrollments
-        val_r5 = count_fy_distinct_enrollments(df_res_raw_combined, fy_start, fy_end, res_progs)
+        val_r5 = count_fy_distinct_enrollments(df_res_raw_combined, fy_start, fy_end, all_progs)
         cell_updates.append({"row": ROW_RES_NEW_ADULT_ENROLLMENTS, "col": col_idx, "val": val_r5})
 
-        # Row 6: Residential Program New Children Enrollments
         val_r6 = 0
         col_map_res = {str(c).lower().strip(): c for c in df_res_raw_combined.columns}
         if "number of children" in col_map_res:
@@ -413,9 +488,19 @@ def process_fiscal_year(fy_key, fy_info, gc, dfs):
         val_r24 = int(dfs["bap"][(dfs["bap"]["Year"] == fy_key) & (dfs["bap"]["Program Enrolling"].astype(str).str.strip().str.lower().isin(all_lower))]["Current Period Actuals"].sum()) if all_progs and not dfs["bap"].empty and "Year" in dfs["bap"].columns else 0
         cell_updates.append({"row": ROW_BAPTISMS, "col": col_idx, "val": val_r24})
 
-        # Row 25: Sobriety Rate
+        # Row 25: Sobriety Rate (Looking 2 years back for post-1-year outcomes)
+        fy_num = int(fy_key.replace("FY", ""))
+        target_grad_fy = f"FY{fy_num - 2}"
+
         if not dfs["sobriety"].empty and "Sobriety 1 Year" in dfs["sobriety"].columns:
-            df_sob_sub = dfs["sobriety"][dfs["sobriety"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(all_lower)] if "Program Enrolling_2091" in dfs["sobriety"].columns else dfs["sobriety"][dfs["sobriety"]["City"] == loc_name]
+            if "Program Enrolling_2091" in dfs["sobriety"].columns:
+                df_sob_sub = dfs["sobriety"][dfs["sobriety"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(all_lower)]
+            else:
+                df_sob_sub = dfs["sobriety"][dfs["sobriety"]["City"] == loc_name]
+
+            if "Year" in df_sob_sub.columns and not df_sob_sub.empty:
+                df_sob_sub = df_sob_sub[df_sob_sub["Year"] == target_grad_fy]
+
             val_r25 = float(df_sob_sub["Sobriety 1 Year"].mean()) if not df_sob_sub.empty else ""
         else:
             val_r25 = ""
@@ -429,41 +514,67 @@ def process_fiscal_year(fy_key, fy_info, gc, dfs):
         # ----------------------------------------------------
         # ROWS 28-35: @WORK & AFTERCARE IMPACT METRICS
         # ----------------------------------------------------
-        val_r28 = count_fy_dates(dfs["atwork"], "Date Job Acquired_7009", all_progs, fy_start, fy_end)
+        # Row 28: Jobs Attained (Checking both _7009 and fallback _5590)
+        val_r28 = count_atwork_dates(dfs["atwork"], ["Date Job Acquired_7009", "Date Job Acquired_5590"], all_progs, fy_start, fy_end)
         cell_updates.append({"row": ROW_JOBS_ATTAINED, "col": col_idx, "val": val_r28})
 
-        val_r29 = count_fy_dates(dfs["atwork"], "Certificate/License Date", all_progs, fy_start, fy_end) if "Certificate/License Date" in dfs["atwork"].columns else 0
+        # Row 29: Credentials Attained (IC_DATE_COLS Industry Certificates Only)
+        val_r29 = count_atwork_dates(dfs["atwork"], IC_DATE_COLS, all_progs, fy_start, fy_end)
         cell_updates.append({"row": ROW_CREDENTIALS_ATTAINED, "col": col_idx, "val": val_r29})
 
-        cnt_bc = count_fy_dates(dfs["atwork"], "Birth Certificate Obtained Date_6638", all_progs, fy_start, fy_end)
-        cnt_id = count_fy_dates(dfs["atwork"], "State ID Obtained Date_6637", all_progs, fy_start, fy_end)
-        cnt_ss = count_fy_dates(dfs["atwork"], "Social Security Card Obtained Date_6639", all_progs, fy_start, fy_end)
+        # Row 30: ID Documents
+        cnt_bc = count_atwork_dates(dfs["atwork"], "Birth Certificate Obtained Date_6638", all_progs, fy_start, fy_end)
+        cnt_id = count_atwork_dates(dfs["atwork"], "State ID Obtained Date_6637", all_progs, fy_start, fy_end)
+        cnt_ss = count_atwork_dates(dfs["atwork"], "Social Security Card Obtained Date_6639", all_progs, fy_start, fy_end)
         cell_updates.append({"row": ROW_IDS_CARDS_DOCS, "col": col_idx, "val": (cnt_bc + cnt_id + cnt_ss)})
 
-        val_r31 = count_fy_dates(dfs["atwork"], "Driver's License Date_5071", all_progs, fy_start, fy_end)
+        # Row 31: Driver's Licenses
+        val_r31 = count_atwork_dates(dfs["atwork"], "Driver's License Date_5071", all_progs, fy_start, fy_end)
         cell_updates.append({"row": ROW_DRIVERS_LICENSES, "col": col_idx, "val": val_r31})
 
-        val_r32 = count_fy_dates(dfs["atwork"], "High School Equivalency (HSE) Date_5110", all_progs, fy_start, fy_end)
+        # Row 32: High School Equivalency (HSE)
+        val_r32 = count_atwork_dates(dfs["atwork"], "High School Equivalency (HSE) Date_5110", all_progs, fy_start, fy_end)
         cell_updates.append({"row": ROW_HSE_ATTAINED, "col": col_idx, "val": val_r32})
 
-        val_r33 = count_fy_dates(dfs["atwork"], "Bank Account Obtained Date_6640", all_progs, fy_start, fy_end)
+        # Row 33: Bank Accounts
+        val_r33 = count_atwork_dates(dfs["atwork"], "Bank Account Obtained Date_6640", all_progs, fy_start, fy_end)
         cell_updates.append({"row": ROW_BANK_ACCOUNTS, "col": col_idx, "val": val_r33})
 
         # Row 34: Housing Burden (1-Yr Post-Graduation)
         if not dfs["housing"].empty and "Housing Under 30% (Recent)" in dfs["housing"].columns:
-            df_h_sub = dfs["housing"][dfs["housing"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(all_lower)] if "Program Enrolling_2091" in dfs["housing"].columns else dfs["housing"][dfs["housing"]["City"] == loc_name]
+            if "Program Enrolling_2091" in dfs["housing"].columns:
+                df_h_sub = dfs["housing"][dfs["housing"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(all_lower)]
+            else:
+                df_h_sub = dfs["housing"][dfs["housing"]["City"] == loc_name]
+
+            if "Year" in df_h_sub.columns and not df_h_sub.empty:
+                df_h_sub = df_h_sub[df_h_sub["Year"] == target_grad_fy]
+
             val_r34 = float(df_h_sub["Housing Under 30% (Recent)"].mean()) if not df_h_sub.empty else ""
         else:
             val_r34 = ""
         cell_updates.append({"row": ROW_HOUSING_BURDEN_1YR, "col": col_idx, "val": round(val_r34, 4) if isinstance(val_r34, float) and not np.isnan(val_r34) else ""})
 
-        # Row 35: Wage Increase (Graduation to 1-Yr Post-Graduation)
+        # Row 35: Wage Increase (Living Wage Criteria: Sober & Non-Intern Graduates Only)
         if not dfs["lw"].empty and "Wage (Grad)" in dfs["lw"].columns and "Wage (Recent)" in dfs["lw"].columns:
-            df_w_sub = dfs["lw"][dfs["lw"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(all_lower)] if "Program Enrolling_2091" in dfs["lw"].columns else dfs["lw"][dfs["lw"]["City"] == loc_name]
+            if "Program Enrolling_2091" in dfs["lw"].columns:
+                df_w_sub = dfs["lw"][dfs["lw"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(all_lower)].copy()
+            else:
+                df_w_sub = dfs["lw"][dfs["lw"]["City"] == loc_name].copy()
+
+            if "Year" in df_w_sub.columns and not df_w_sub.empty:
+                df_w_sub = df_w_sub[df_w_sub["Year"] == target_grad_fy]
+
+            if "Pays LW? (Recent)" in df_w_sub.columns and not df_w_sub.empty:
+                df_w_sub = df_w_sub[df_w_sub["Pays LW? (Recent)"] != "Not sober"]
+
+            if "Program Enrolling_2091" in df_w_sub.columns and not df_w_sub.empty:
+                df_w_sub = df_w_sub[~df_w_sub["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)]
+
             if not df_w_sub.empty:
-                w_grad = pd.to_numeric(df_w_sub["Wage (Grad)"], errors="coerce").fillna(0)
-                w_rec = pd.to_numeric(df_w_sub["Wage (Recent)"], errors="coerce").fillna(0)
-                wage_diff = (w_rec - w_grad)
+                w_grad = pd.to_numeric(df_w_sub["Wage (Grad)"], errors="coerce")
+                w_rec = pd.to_numeric(df_w_sub["Wage (Recent)"], errors="coerce")
+                wage_diff = (w_rec - w_grad).dropna()
                 val_r35 = float(wage_diff.mean()) if not wage_diff.empty else ""
             else:
                 val_r35 = ""
@@ -543,7 +654,7 @@ def run_marketing_processor(input_folder_name="Quarterly KPI Processed Data"):
 
     xls_atwork = pd.ExcelFile(fh_atwork)
     atwork_sheets = xls_atwork.sheet_names
-    df_atwork  = pd.read_excel(xls_atwork, sheet_name="@Work Raw Data") if "@Work Raw Data" in atwork_sheets else pd.DataFrame()
+    df_atwork  = pd.read_excel(xls_atwork, sheet_name="@Work Processed") if "@Work Processed" in atwork_sheets else (pd.read_excel(xls_atwork, sheet_name="@Work Raw Data") if "@Work Raw Data" in atwork_sheets else pd.DataFrame())
 
     dfs = {
         "occ": df_occ,

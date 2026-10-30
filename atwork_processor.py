@@ -20,6 +20,22 @@ INTERN_PROGRAM_NAMES = {
     "cdac trainee",
 }
 
+def get_intern_program_value(row):
+    """
+    Prioritization Rule:
+    - If either Post Graduate or Intern Program is null, prioritize non-null.
+    - If they contradict (both populated and different), prioritize Post Graduate.
+    """
+    post_grad = row.get("Post Graduate Program Association_6619")
+    intern_prog = row.get("Intern Program_6619")
+
+    post_str = str(post_grad).strip() if pd.notna(post_grad) and str(post_grad).strip().lower() != "nan" else None
+    intern_str = str(intern_prog).strip() if pd.notna(intern_prog) and str(intern_prog).strip().lower() != "nan" else None
+
+    if post_str:
+        return post_str
+    return intern_str
+
 
 def combine_columns_with_priority(df, col_new, col_old, target_col, win_start, win_end):
     """
@@ -62,7 +78,6 @@ def run_atwork_processing(
 
     COL_ID         = "Record Id_152"
     COL_PROG       = "Program Enrolling_2091"
-    COL_INTERN     = "Intern Program_6619"
     COL_DATE       = "Start Date_2090"
     COL_DATE_ENTER = "Date Entered CityTeam @ Work_3842"
     COL_BARRIER    = "Employment Barriers_3870"
@@ -199,6 +214,8 @@ def run_atwork_processing(
     def process_atwork_kpis(df_raw):
         df = df_raw.copy()
 
+        df["_INTERN_RESOLVED"] = df.apply(get_intern_program_value, axis=1)
+
         win_start = constants.CURRENT_FY_QX_START
         win_end   = constants.CURRENT_Q_END
 
@@ -230,7 +247,7 @@ def run_atwork_processing(
 
         # Vectorized eligibility with case-insensitive intern program matching
         prog_series   = df[COL_PROG].astype(str).str.strip()
-        intern_series = df[COL_INTERN].astype(str).str.strip() if COL_INTERN in df.columns else pd.Series("", index=df.index)
+        intern_series = df["_INTERN_RESOLVED"].astype(str).str.strip()
         
         is_pgi        = prog_series.str.lower().isin(INTERN_PROGRAM_NAMES)
         program_eligible = (

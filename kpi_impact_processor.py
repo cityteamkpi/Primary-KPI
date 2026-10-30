@@ -20,6 +20,22 @@ INTERN_PROGRAM_NAMES = {
     "cdac trainee",
 }
 
+def get_intern_program_value(row):
+    """
+    Prioritization Rule:
+    - If either Post Graduate or Intern Program is null, prioritize non-null.
+    - If they contradict (both populated and different), prioritize Post Graduate.
+    """
+    post_grad = row.get("Post Graduate Program Association_6619")
+    intern_prog = row.get("Intern Program_6619")
+
+    post_str = str(post_grad).strip() if pd.notna(post_grad) and str(post_grad).strip().lower() != "nan" else None
+    intern_str = str(intern_prog).strip() if pd.notna(intern_prog) and str(intern_prog).strip().lower() != "nan" else None
+
+    if post_str:
+        return post_str
+    return intern_str
+
 
 def run_kpi_impact_processing(
     baptisms_input_file       = 'CityTeam Baptisms.xlsx',
@@ -37,7 +53,6 @@ def run_kpi_impact_processing(
 
     COL_RECORD_ID  = "Record Id_102"
     COL_PROGRAM    = "Program Enrolling"
-    COL_INTERN     = "Intern Program_6619"
 
     # Mentorship Flag Columns
     COL_MENTORSHIP_OLD = "Acquired Spiritual Mentor_5136"
@@ -85,6 +100,8 @@ def run_kpi_impact_processing(
 
         print(f"\n--- {label} ---")
         print(f"   Raw rows: {len(df)}")
+
+        df["_INTERN_RESOLVED"] = df.apply(get_intern_program_value, axis=1)
 
         # ---------------------------------------------------------------------
         # Mentorship Specific Logic: Consolidate Mentor Flag & Date
@@ -165,10 +182,10 @@ def run_kpi_impact_processing(
 
         # Intern priority flag with case-insensitive matching
         df["_intern_priority"] = 0
-        if COL_INTERN in df.columns and COL_PROGRAM in df.columns:
+        if COL_PROGRAM in df.columns:
             is_intern = df[COL_PROGRAM].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
-            df.loc[is_intern & df[COL_INTERN].notna(), "_intern_priority"] = 1
-            df.loc[is_intern, COL_PROGRAM] = df.loc[is_intern, COL_INTERN]
+            df.loc[is_intern & df["_INTERN_RESOLVED"].notna(), "_intern_priority"] = 1
+            df.loc[is_intern, COL_PROGRAM] = df.loc[is_intern, "_INTERN_RESOLVED"]
             before = len(df)
             
             # Exclude remaining intern program entries

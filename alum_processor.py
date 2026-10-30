@@ -31,6 +31,7 @@ COL_RECORD_ID = "Record Id_102"
 COL_NAME = "Name_2057"
 COL_PROGRAM = "Program Enrolling_2091"
 COL_INTERN_PROGRAM = "Intern Program_6619"
+COL_POST_GRAD = "Post Graduate Program Association_6619"
 COL_START_DATE = "Start Date_2090"
 COL_EXIT_DATE = "Exit Date_2100"
 COL_EXIT_REASON = "Primary Reason for Exit_2102"
@@ -49,6 +50,22 @@ INTERN_PROGRAM_NAMES = {
     "leadership module",
     "cdac trainee",
 }
+
+def get_intern_program_value(row):
+    """
+    Prioritization Rule:
+    - If either Post Graduate or Intern Program is null, prioritize non-null.
+    - If they contradict (both populated and different), prioritize Post Graduate.
+    """
+    post_grad = row.get(COL_POST_GRAD)
+    intern_prog = row.get(COL_INTERN_PROGRAM)
+
+    post_str = str(post_grad).strip() if pd.notna(post_grad) and str(post_grad).strip().lower() != "nan" else None
+    intern_str = str(intern_prog).strip() if pd.notna(intern_prog) and str(intern_prog).strip().lower() != "nan" else None
+
+    if post_str:
+        return post_str
+    return intern_str
 
 def clean_wage(val):
     if pd.isna(val): return 0.0
@@ -324,12 +341,13 @@ def run_alum_processing(
 
     df_raw = df_raw_complete.copy()
 
+    # Calculate prioritized intern program value
+    df_raw["_INTERN_RESOLVED"] = df_raw.apply(get_intern_program_value, axis=1)
+
     # 2. Parsing & Dropping Invalid Client Names
     df_raw_parsed = df_raw.dropna(subset=[COL_NAME]).copy()
     if COL_RECORD_ID not in df_raw_parsed.columns:
         df_raw_parsed[COL_RECORD_ID] = np.nan
-    if COL_INTERN_PROGRAM not in df_raw_parsed.columns:
-        df_raw_parsed[COL_INTERN_PROGRAM] = np.nan
 
     df_raw_parsed[COL_EXIT_DATE] = pd.to_datetime(df_raw_parsed[COL_EXIT_DATE], errors="coerce")
     df_raw_parsed[COL_CHECKIN] = pd.to_datetime(df_raw_parsed[COL_CHECKIN], errors="coerce")
