@@ -44,11 +44,13 @@ COL_HOW_CHECKED = "How Checked_6584"
 GRAD_REASONS = ["Graduation", "Completer", "Completion of Program"]
 MONTHLY_HOURS = 173.33
 
-# Intern Program Names Set
-INTERN_PROGRAM_NAMES = {
+# Set of intern and forward program names (case-insensitive)
+INTERN_AND_FORWARD_PROGRAM_NAMES = {
     "program graduate intern",
     "leadership module",
     "cdac trainee",
+    "forward program",
+    "forward",
 }
 
 def get_intern_program_value(row):
@@ -254,28 +256,43 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
     }
 
 def process_aftercare_tab(df_raw_parsed):
-    """Processes Aftercare tab strictly for GRADUATED clients exiting from FY24 to present,
-    evaluating ONLY their absolute most recent check-in date.
+    """Processes Aftercare tab for ALL clients who EVER graduated from a Renew program (no date limits),
+    evaluating ONLY their absolute most recent check-in date. Always maps their program column back
+    to their original Renew graduation program.
     """
     df = df_raw_parsed.copy()
-    
-    fy24_start = pd.Timestamp("2023-09-01")
     today_ts = pd.Timestamp.now().normalize()
     
-    # Strictly filter for clients who GRADUATED and exited from FY24 to present (>= Sept 1, 2023)
-    is_grad = df[COL_EXIT_REASON].isin(GRAD_REASONS)
-    is_fy24_plus = df[COL_EXIT_DATE].notna() & (df[COL_EXIT_DATE] >= fy24_start)
-    
-    df = df[is_grad & is_fy24_plus].copy()
-    if df.empty:
+    renew_programs_set = {str(p).strip().lower() for p in constants.RENEW_PROGRAMS}
+
+    # Find ALL Renew graduation events across the entire dataset (no date filter)
+    df_grads_renew = df[
+        df[COL_PROGRAM].astype(str).str.strip().str.lower().isin(renew_programs_set) &
+        df[COL_EXIT_REASON].isin(GRAD_REASONS) &
+        df[COL_EXIT_DATE].notna()
+    ].copy()
+
+    if df_grads_renew.empty:
         return pd.DataFrame()
 
-    # Parse checkin date
-    df["_checkin_dt"] = pd.to_datetime(df[COL_CHECKIN], errors="coerce")
+    # Create lookup map: Record ID -> Original Renew Graduation Program name
+    orig_renew_map = (
+        df_grads_renew.sort_values(by=COL_EXIT_DATE)
+        .groupby(COL_RECORD_ID)[COL_PROGRAM]
+        .last()
+        .to_dict()
+    )
 
-    # Isolate ONLY the absolute latest check-in per client (Record ID)
+    # Pull all records across the dataset for these specific Renew graduates
+    grad_record_ids = set(orig_renew_map.keys())
+    df_client_records = df[df[COL_RECORD_ID].isin(grad_record_ids)].copy()
+
+    # Parse checkin dates
+    df_client_records["_checkin_dt"] = pd.to_datetime(df_client_records[COL_CHECKIN], errors="coerce")
+
+    # Isolate strictly the single absolute latest check-in per client (Record ID)
     df_latest = (
-        df[df["_checkin_dt"].notna()]
+        df_client_records[df_client_records["_checkin_dt"].notna()]
         .sort_values(by=["_checkin_dt", COL_EXIT_DATE], ascending=[False, False])
         .drop_duplicates(subset=[COL_RECORD_ID], keep="first")
         .copy()
@@ -283,6 +300,9 @@ def process_aftercare_tab(df_raw_parsed):
 
     if df_latest.empty:
         return pd.DataFrame()
+
+    # Always override Program Enrolling with their original Renew Graduation Program
+    df_latest[COL_PROGRAM] = df_latest[COL_RECORD_ID].map(orig_renew_map).fillna(df_latest[COL_PROGRAM])
 
     # Calculate days elapsed since the latest check-in
     df_latest["_days_ago"] = (today_ts - df_latest["_checkin_dt"]).dt.days
@@ -455,7 +475,7 @@ def run_alum_processing(
     # Helper function to check if a program is any form of intern program
     def is_intern_program(prog_val):
         if pd.isna(prog_val): return False
-        return str(prog_val).strip().lower() in INTERN_PROGRAM_NAMES
+        return str(prog_val).strip().lower() in INTERN_AND_FORWARD_PROGRAM_NAMES
 
     # --- Sobriety Tab ---
     df_sobriety = fy_filtered_df.copy()
@@ -516,7 +536,7 @@ def run_alum_processing(
     detailed_df = results_df.sort_values(by=[COL_PROGRAM, COL_NAME]).copy() if not results_df.empty else results_df
 
     # --- Aftercare Tab ---
-    print("Processing Aftercare Tab (Graduated Clients, Latest Checkin Only)...")
+    print("Processing Aftercare Tab (All-Time Ever-Renew Graduates Mapped to Original Renew Program)...")
     df_aftercare = process_aftercare_tab(df_raw_parsed)
 
     # 5. Write Output

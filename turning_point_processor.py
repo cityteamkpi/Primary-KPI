@@ -70,6 +70,7 @@ def run_turning_point_processing(
     RAW_DATA_START_COL  = 1
 
     COL_RECORD_ID      = "Record Id_102"
+    COL_NAME           = "Name_2057"
     COL_PROGRAM        = "Program Enrolling_2091"
     COL_START_DATE     = "Start Date_2090"
     COL_EXIT_DATE      = "Exit Date_2100"
@@ -101,6 +102,14 @@ def run_turning_point_processing(
     fh, _, _ = download_drive_file(drive_service, input_file, input_folder_id)
     df_raw = load_raw(fh, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
 
+    # Reorder df_raw so Name_2057 is right next to Record Id_102 if present
+    if COL_RECORD_ID in df_raw.columns and COL_NAME in df_raw.columns:
+        cols_raw = list(df_raw.columns)
+        cols_raw.remove(COL_NAME)
+        rec_idx = cols_raw.index(COL_RECORD_ID)
+        cols_raw.insert(rec_idx + 1, COL_NAME)
+        df_raw = df_raw[cols_raw]
+
     # Initial cleanup
     prog_lower_map = {p.lower(): p for p in PROGRAMS_TO_INCLUDE}
     def match_program(val):
@@ -117,11 +126,12 @@ def run_turning_point_processing(
     # Compute prioritized intern column
     df_base["_INTERN_RESOLVED"] = df_base.apply(get_intern_program_value, axis=1)
 
+    # Preserve original program name before intern remapping
+    df_base["_ORIGINAL_PROGRAM"] = df_base[COL_PROGRAM]
+
     # Remap Program Graduate Intern variations to their specific Intern Program
     is_intern = df_base[COL_PROGRAM].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
     df_base.loc[is_intern, COL_PROGRAM] = df_base.loc[is_intern, "_INTERN_RESOLVED"].apply(match_program)
-
-    df_base = df_base[df_base[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)
 
     # Helper function to get Monday start of week
     def get_week_start(dt_series):
@@ -136,6 +146,12 @@ def run_turning_point_processing(
 
     def process_exited_category(df_base, reasons_list=None):
         df = df_base.copy()
+        
+        # Exclude intern programs from Turning Point Graduates
+        is_orig_intern = df["_ORIGINAL_PROGRAM"].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
+        df = df[~is_orig_intern].copy()
+        df = df[df[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].reset_index(drop=True)
+
         df["_priority"] = df[COL_EXIT_REASON].isin(reasons_list).astype(int) if reasons_list else 0
         df = (df.sort_values(["_priority", COL_EXIT_DATE], ascending=[False, False])
                 .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM, COL_START_DATE], keep="first")
@@ -156,7 +172,7 @@ def run_turning_point_processing(
         for k, (w_start, w_end) in constants.ACTUALS_WINDOWS.items():
             df[k] = (df[COL_EXIT_DATE].notna() & (df[COL_EXIT_DATE] >= w_start) & (df[COL_EXIT_DATE] <= w_end)).astype(int)
 
-        cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
+        cols = [COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_EXIT_REASON,
                 "City", "Year", "Quarter", "Year Q", "Week", "Next FY Goal"] + list(constants.ACTUALS_WINDOWS.keys())
         df = df[[c for c in cols if c in df.columns]].copy()
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
@@ -172,7 +188,7 @@ def run_turning_point_processing(
         return 0
 
     def process_occupancy(df_base):
-        df = df_base.copy()
+        df = df_base[df_base[COL_PROGRAM].isin(PROGRAMS_TO_INCLUDE)].copy()
         df["_no_exit"] = df[COL_EXIT_DATE].isna().astype(int)
         df = (df.sort_values(["_no_exit", COL_START_DATE], ascending=[False, False])
                 .drop_duplicates(subset=[COL_RECORD_ID], keep="first")
@@ -213,7 +229,7 @@ def run_turning_point_processing(
         df["Next FY Goal"]       = df[COL_PROGRAM].map(constants.NEXT_FY_OCC_GOALS_TP)
         df["Prior FY Occupancy"] = df[COL_PROGRAM].map(constants.TP_PRIOR_FY)
 
-        cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE,
+        cols = [COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE,
                 "City", constants.OCC_PRIOR_LABEL, constants.OCC_CURRENT_LABEL,
                 "Name of Child_6313", "Number of Children", "Capacity", "Goal", "Next FY Goal", "Prior FY Occupancy"]
         df = df[[c for c in cols if c in df.columns]].copy()
@@ -221,7 +237,7 @@ def run_turning_point_processing(
         df[COL_EXIT_DATE]  = fmt_date(df, COL_EXIT_DATE)
         for col in [constants.OCC_PRIOR_LABEL, constants.OCC_CURRENT_LABEL,
                     "Capacity", "Goal", "Prior FY Occupancy"]:
-            if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce")
         return df.reset_index(drop=True)
 
     def process_housed(df_raw):
@@ -282,7 +298,7 @@ def run_turning_point_processing(
         housed_goals_map = getattr(constants, "NEXT_FY_HOUSED_GOALS_TP", {})
         df["Goal"] = df[COL_PROGRAM].map(housed_goals_map).fillna(0).astype(int)
 
-        cols = [COL_RECORD_ID, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_HOUSING_CHECK, COL_EXIT_REASON,
+        cols = [COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, COL_HOUSING_CHECK, COL_EXIT_REASON,
                 "City", "Year", "Quarter", "Year Q", "Week", "Successfully Housed?", "Capacity", "Goal"
                 ] + actuals_cols
 
