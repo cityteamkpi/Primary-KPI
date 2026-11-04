@@ -6,7 +6,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from gspread_dataframe import set_with_dataframe
 
 def find_folder_id(drive_service, folder_name):
-    """Finds a folder ID by name."""
+    """Finds a folder ID by name across My Drive and Shared Drives."""
     query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     results = drive_service.files().list(
         q=query,
@@ -34,18 +34,36 @@ def resolve_folder_id(drive_service, folder_name, folder_label="Folder"):
 
 def find_file_id(drive_service, filename, folder_id=None, mime_type=None):
     """
-    Searches for a file by name and optional parent/MIME type.
-    Returns the file dict or None if not found.
+    Searches for a file by name and optional parent/MIME type across Shared Drives.
+    Supports fallback matching without extensions.
     """
-    query = f"name = '{filename}' and trashed = false"
+    query = f"trashed = false"
     if folder_id:
         query += f" and '{folder_id}' in parents"
+    
+    exact_query = f"{query} and name = '{filename}'"
     if mime_type:
-        query += f" and mimeType = '{mime_type}'"
+        exact_query += f" and mimeType = '{mime_type}'"
 
     results = drive_service.files().list(
-        q=query,
-        fields="files(id, parents, mimeType)",
+        q=exact_query,
+        fields="files(id, parents, mimeType, name)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+        corpora='allDrives'
+    ).execute()
+
+    items = results.get('files', [])
+    if items:
+        return items[0]
+
+    # Fallback search without extension
+    base_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
+    fallback_query = f"{query} and (name = '{base_name}' or name contains '{base_name}')"
+
+    results = drive_service.files().list(
+        q=fallback_query,
+        fields="files(id, parents, mimeType, name)",
         supportsAllDrives=True,
         includeItemsFromAllDrives=True,
         corpora='allDrives'
@@ -55,14 +73,14 @@ def find_file_id(drive_service, filename, folder_id=None, mime_type=None):
     if not items:
         return None
     if len(items) > 1:
-        print(f"Warning: Found {len(items)} files with name '{filename}'. Using the first one.")
+        print(f"Warning: Found {len(items)} files matching '{filename}'. Using the first one.")
     return items[0]
 
 def download_drive_file(drive_service, filename, folder_id=None):
     """
     Searches for a file and downloads it into a BytesIO stream.
     Handles both binary files and Google Sheets (via XLSX export).
-    Returns (stream, parent_folder_id, file_id).
+    Includes supportsAllDrives=True for Shared Drive compatibility.
     """
     target = find_file_id(drive_service, filename, folder_id)
     if not target:
@@ -72,17 +90,19 @@ def download_drive_file(drive_service, filename, folder_id=None):
     mime_type = target.get('mimeType', '')
     parents   = target.get('parents', [])
 
-    if not parents:
-        raise ValueError(f"Could not determine parent folder for {filename}")
-    parent_id = parents[0]
+    parent_id = parents[0] if parents else folder_id
 
+    # Add supportsAllDrives=True to request objects to allow Shared Drive downloads
     if mime_type == 'application/vnd.google-apps.spreadsheet':
         request = drive_service.files().export_media(
             fileId=file_id,
             mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     else:
-        request = drive_service.files().get_media(fileId=file_id)
+        request = drive_service.files().get_media(
+            fileId=file_id,
+            supportsAllDrives=True
+        )
 
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
@@ -110,7 +130,7 @@ def download_drive_file(drive_service, filename, folder_id=None):
 def load_raw(fh, header_row=3, start_col=1):
     """
     Standardized Excel ingestion logic.
-    Loads xlsx from defined header row, strips empty rows/cols and 'Unnamed' columns.
+    Loads xlsx from defined header row (default row 4), strips empty rows/cols and 'Unnamed' columns.
     """
     df = pd.read_excel(fh, header=header_row, engine="openpyxl")
     df = df.iloc[:, start_col:]
@@ -122,9 +142,6 @@ def write_tab(ss, tab_name, dataframe, include_index=False, include_column_heade
     """
     Standardized helper to write a pandas DataFrame to a Google Sheet tab.
     Clears the tab if it exists, creates it if it doesn't.
-    - Uses ws.clear() to preserve worksheet ID (keeps Looker Studio connections intact)
-    - Uses value_input_option='RAW' to prevent Google Sheets from interpreting
-      integers as dates (fixes 1899-12-30 issue permanently)
     """
     try:
         ws = ss.worksheet(tab_name)
@@ -134,7 +151,6 @@ def write_tab(ss, tab_name, dataframe, include_index=False, include_column_heade
         cols = max(20, len(dataframe.columns) + 5)
         ws = ss.add_worksheet(title=tab_name, rows=rows, cols=cols)
 
-    # Convert columns to safe types before writing
     df_write = dataframe.copy()
     for col in df_write.columns:
         if pd.api.types.is_datetime64_any_dtype(df_write[col]):
@@ -146,15 +162,12 @@ def write_tab(ss, tab_name, dataframe, include_index=False, include_column_heade
         else:
             df_write[col] = df_write[col].fillna("")
 
-    # Use gspread's update with RAW input to prevent date interpretation
-    # Convert all values to JSON-serializable types
     import math
     def to_safe(val):
-        if val is None: return ""
-        if val is pd.NaT: return ""
+        if val is None or val is pd.NaT: return ""
         if isinstance(val, float) and math.isnan(val): return ""
-        if hasattr(val, 'isoformat'): return val.isoformat()  # datetime/date/Timestamp
-        if hasattr(val, 'item'): return val.item()  # numpy types
+        if hasattr(val, 'isoformat'): return val.isoformat()
+        if hasattr(val, 'item'): return val.item()
         return val
 
     if include_column_header:
@@ -163,4 +176,4 @@ def write_tab(ss, tab_name, dataframe, include_index=False, include_column_heade
         data = [[to_safe(v) for v in row] for row in df_write.values.tolist()]
     ws.update(data, value_input_option='RAW')
     print(f"   ✅ '{tab_name}' written ({len(dataframe)} rows)")
-    time.sleep(1)  # Respect API rate limits
+    time.sleep(1)

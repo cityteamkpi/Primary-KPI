@@ -3,7 +3,7 @@
 #
 # 1. Reads "Clients in All Programs.xlsx"
 # 2. Creates/Updates "Clients in All Programs - Processed" Google Sheet 
-#       - with Renew, Men's TP, Women's TP tabs, etc.
+#       - with Renew, Men's TP, Women's TP, Program Interns tabs, etc.
 # 3. Computes averages into "Clients in All Programs Average"
 # =========================================================================
 
@@ -71,6 +71,7 @@ PROGRAM_CATEGORY = {
     "San Jose Women's House of Light": "Forward",
     "San Jose Women's House of Light Number of Children": "Forward",
     "Oakland Forward Men": "Forward",
+    "Oakland Forwad Men": "Forward",  # Handles raw data typo
     "Oakland Forward Women": "Forward",
     "Oakland Forward Women Number of Children": "Forward",
     "Portland Forward": "Forward",
@@ -87,9 +88,9 @@ PROGRAM_CATEGORY = {
 
 def get_intern_program_value(row):
     """
-    Prioritization Rule:
-    - If either Post Graduate or Intern Program is null, prioritize non-null.
-    - If they contradict (both populated and different), prioritize Post Graduate.
+    Prioritization Rule for ALL Interns (Program Graduate Intern, Leadership Module, CDAC Trainee):
+    - Check Post Graduate Program Association or Intern Program association.
+    - If both are null/missing, group under 'Unassigned Intern'.
     """
     post_grad = row.get("Post Graduate Program Association_6619")
     intern_prog = row.get("Intern Program_6619")
@@ -99,7 +100,11 @@ def get_intern_program_value(row):
 
     if post_str:
         return post_str
-    return intern_str
+    if intern_str:
+        return intern_str
+        
+    return "Unassigned Intern"
+
 
 def run_utilization_processing(
     input_report_file       = 'Clients in All Programs.xlsx',
@@ -175,11 +180,15 @@ def run_utilization_processing(
     spreadsheet = gc.open_by_key(utilization_file_id)
     tabs_to_update = ["Renew", "Men Turning Point", "Women Turning Point", "Forward", "Program Interns", "Other", "APH", "Elevate"]
 
-    program_counts = df_raw[program_col].astype(str).str.strip().value_counts()
+    # Separate regular client counts vs. intern assigned counts
+    non_intern_mask = ~df_raw[program_col].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
+    program_counts = df_raw[non_intern_mask][program_col].astype(str).str.strip().value_counts()
 
-    # Calculate total intern counts matching any variation in INTERN_PROGRAM_NAMES
-    is_intern = df_raw[program_col].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
-    total_intern_count = int(is_intern.sum())
+    # All intern types aggregated by assigned program (unassigned -> "Unassigned Intern")
+    is_intern_mask = df_raw[program_col].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)
+    df_interns = df_raw[is_intern_mask].copy()
+    df_interns["Assigned_Program"] = df_interns.apply(get_intern_program_value, axis=1)
+    intern_counts_by_program = df_interns["Assigned_Program"].dropna().value_counts()
 
     # =========================================================================
     # 4b. Calculate children counts for women's programs
@@ -234,6 +243,16 @@ def run_utilization_processing(
         if not df_sheet.empty:
             df_sheet.index = valid_dates[mask].strftime('%-m/%-d/%y')
 
+        # Clean up old raw intern title columns from the "Program Interns" tab if present
+        if tab_name == "Program Interns":
+            raw_title_cols = [c for c in df_sheet.columns if str(c).strip().lower() in INTERN_PROGRAM_NAMES]
+            if raw_title_cols:
+                df_sheet = df_sheet.drop(columns=raw_title_cols)
+
+            for prog in intern_counts_by_program.index:
+                if prog not in df_sheet.columns:
+                    df_sheet[prog] = 0
+
         # Ensure children count columns exist right next to women's program columns
         cols_list = list(df_sheet.columns)
         for prog in WOMEN_PROGRAMS:
@@ -248,9 +267,8 @@ def run_utilization_processing(
             clean_prog = str(program).strip()
             if clean_prog.endswith(" Number of Children"): continue
             
-            # Map intern variations to Program Interns tab column
-            if clean_prog.lower() in INTERN_PROGRAM_NAMES or tab_name == "Program Interns":
-                count = total_intern_count
+            if tab_name == "Program Interns":
+                count = int(intern_counts_by_program.get(clean_prog, 0))
             else:
                 count = int(program_counts.get(clean_prog, 0))
 
@@ -443,35 +461,43 @@ def run_averages_processing(
                     return None
         return None
 
-    def compute_averages(df, prog_cols, period_fn, fy_period_fn=None, is_weekly=False):
+    def compute_averages(tab_tuples, period_fn, fy_period_fn=None, is_weekly=False):
+        """
+        tab_tuples: list of tuples (df, prog_cols, tab_name)
+        """
         rows = []
-        df = df.copy()
-        df["_period"] = df["Date"].apply(period_fn)
-        df["_fy_period"] = df["Date"].apply(fy_period_fn) if fy_period_fn else df["Date"].apply(period_fn)
-        df["_fy"] = df["Date"].apply(get_fy_label)
-        if is_weekly:
-            df["_week_date"] = df["Date"].apply(get_week_start_date)
+        for df, prog_cols, tab_name in tab_tuples:
+            if df.empty: continue
+            df = df.copy()
+            df["_period"] = df["Date"].apply(period_fn)
+            df["_fy_period"] = df["Date"].apply(fy_period_fn) if fy_period_fn else df["Date"].apply(period_fn)
+            df["_fy"] = df["Date"].apply(get_fy_label)
+            if is_weekly:
+                df["_week_date"] = df["Date"].apply(get_week_start_date)
 
-        for period, grp in df.groupby("_period", sort=False):
-            fy = grp["_fy"].iloc[0]
-            fy_period = grp["_fy_period"].iloc[0]
-            week_date = grp["_week_date"].iloc[0] if is_weekly else grp["Date"].min().strftime("%Y-%m-%d")
-            
-            for prog in prog_cols:
-                if prog not in grp.columns: continue
-                vals = pd.to_numeric(grp[prog], errors="coerce").dropna()
-                avg = round(vals.mean(), 2) if not vals.empty else 0
+            for period, grp in df.groupby("_period", sort=False):
+                fy = grp["_fy"].iloc[0]
+                fy_period = grp["_fy_period"].iloc[0]
+                week_date = grp["_week_date"].iloc[0] if is_weekly else grp["Date"].min().strftime("%Y-%m-%d")
                 
-                row_dict = {
-                    "FY": fy, 
-                    "Period": period, 
-                    "FY Period": fy_period, 
-                    "Date": week_date,
-                    "Category": PROGRAM_CATEGORY.get(prog, "Other"), 
-                    "Program": prog, 
-                    "Average": avg
-                }
-                rows.append(row_dict)
+                for prog in prog_cols:
+                    if prog not in grp.columns: continue
+                    vals = pd.to_numeric(grp[prog], errors="coerce").dropna()
+                    avg = round(vals.mean(), 2) if not vals.empty else 0
+                    
+                    # Program Interns tab rows explicitly get Category = "Intern"
+                    cat = "Intern" if tab_name == "Program Interns" else PROGRAM_CATEGORY.get(prog, "Other")
+                    
+                    row_dict = {
+                        "FY": fy, 
+                        "Period": period, 
+                        "FY Period": fy_period, 
+                        "Date": week_date,
+                        "Category": cat, 
+                        "Program": prog, 
+                        "Average": avg
+                    }
+                    rows.append(row_dict)
         return pd.DataFrame(rows)
 
     def write_averages(tab_name, df_avg, period_col_name):
@@ -489,7 +515,7 @@ def run_averages_processing(
             
             # If existing sheet exists but lacks 'Date', clear tab to refresh structure
             if not existing.empty and "Date" in existing.columns and period_col_name in existing.columns:
-                merge_key = ["FY", period_col_name, "Program"]
+                merge_key = ["FY", period_col_name, "Category", "Program"]
                 existing = existing[~existing.set_index(merge_key).index.isin(df_out.set_index(merge_key).index)]
                 df_out = pd.concat([existing, df_out], ignore_index=True)
             else:
@@ -502,30 +528,25 @@ def run_averages_processing(
 
     # Process occupancy tabs
     occ_tabs = ["Renew", "Men Turning Point", "Women Turning Point", "Forward", "Program Interns", "Other", "APH", "Elevate"]
-    all_occ_dfs = []
-    occ_prog_cols = []
+    occ_tab_tuples = []
     for tab_name in occ_tabs:
         result = read_tab(tab_name)
         if result:
             df_tab, prog_cols = result
-            all_occ_dfs.append(df_tab)
-            for p in prog_cols:
-                if p not in occ_prog_cols:
-                    occ_prog_cols.append(p)
+            occ_tab_tuples.append((df_tab, prog_cols, tab_name))
 
-    if all_occ_dfs:
-        df_occ = pd.concat(all_occ_dfs, ignore_index=True).groupby("Date", as_index=False).sum(numeric_only=True)
-        write_averages("Occupancy Weekly Avg",    compute_averages(df_occ, occ_prog_cols, get_week_label, get_fy_week_label, is_weekly=True), "Week")
-        write_averages("Occupancy Monthly Avg",   compute_averages(df_occ, occ_prog_cols, get_month, get_fy_month), "Month")
-        write_averages("Occupancy Quarterly Avg", compute_averages(df_occ, occ_prog_cols, get_quarter, get_fy_quarter), "Quarter")
+    if occ_tab_tuples:
+        write_averages("Occupancy Weekly Avg",    compute_averages(occ_tab_tuples, get_week_label, get_fy_week_label, is_weekly=True), "Week")
+        write_averages("Occupancy Monthly Avg",   compute_averages(occ_tab_tuples, get_month, get_fy_month), "Month")
+        write_averages("Occupancy Quarterly Avg", compute_averages(occ_tab_tuples, get_quarter, get_fy_quarter), "Quarter")
 
     # Process Mentorship tab
     result = read_tab("Mentorship")
     if result:
         df_m, mentor_progs = result
-        write_averages("Mentorship Weekly Avg",    compute_averages(df_m, mentor_progs, get_week_label, get_fy_week_label, is_weekly=True), "Week")
-        write_averages("Mentorship Monthly Avg",   compute_averages(df_m, mentor_progs, get_month, get_fy_month), "Month")
-        write_averages("Mentorship Quarterly Avg", compute_averages(df_m, mentor_progs, get_quarter, get_fy_quarter), "Quarter")
+        write_averages("Mentorship Weekly Avg",    compute_averages([(df_m, mentor_progs, "Mentorship")], get_week_label, get_fy_week_label, is_weekly=True), "Week")
+        write_averages("Mentorship Monthly Avg",   compute_averages([(df_m, mentor_progs, "Mentorship")], get_month, get_fy_month), "Month")
+        write_averages("Mentorship Quarterly Avg", compute_averages([(df_m, mentor_progs, "Mentorship")], get_quarter, get_fy_quarter), "Quarter")
 
     # =========================================================================
     # Fetch FY27 Goals & Extra Cells from Constants Update Sheet
@@ -546,6 +567,7 @@ def run_averages_processing(
         "Oakland Women Turning Point": "I19",
         "Portland Community of Hope": "I23",
         "San Jose Youth Collective": "I43",
+        "Oakland Forwad Men": "I15",
     }
 
     program_goals = {}
@@ -602,8 +624,10 @@ def run_averages_processing(
             latest_row = df_tab[df_tab["Date"] == latest_date].iloc[0]
             for prog in prog_cols:
                 if prog in latest_row:
+                    cat = "Intern" if tab_name == "Program Interns" else PROGRAM_CATEGORY.get(prog, "Other")
                     latest_occ_rows.append({
                         "Date": latest_date.strftime("%-m/%-d/%y"), 
+                        "Category": cat,
                         "Program": prog, 
                         "Count": pd.to_numeric(latest_row[prog], errors="coerce")
                     })
@@ -612,12 +636,13 @@ def run_averages_processing(
         df_latest_occ = pd.DataFrame(latest_occ_rows)
         df_latest_occ["Count"] = df_latest_occ["Count"].fillna(0)
 
-        gv_mask = df_latest_occ["Program"] == "GV Turning Point"
+        gv_mask = (df_latest_occ["Program"] == "GV Turning Point") & (df_latest_occ["Category"] != "Intern")
         if gv_mask.any():
             df_latest_occ.loc[gv_mask, "Count"] += gv_tp_extra_count
 
-        df_latest_occ["Category"] = df_latest_occ["Program"].map(PROGRAM_CATEGORY).fillna("Other")
-        df_latest_occ["Next FY Goal"] = df_latest_occ["Program"].map(program_goals).fillna(0).astype(int)
+        df_latest_occ["Next FY Goal"] = df_latest_occ.apply(
+            lambda r: program_goals.get(r["Program"], 0) if r["Category"] != "Intern" else 0, axis=1
+        )
 
         df_latest_occ = df_latest_occ[["Date", "Category", "Program", "Count", "Next FY Goal"]]
 

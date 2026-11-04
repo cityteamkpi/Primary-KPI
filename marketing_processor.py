@@ -1,25 +1,42 @@
 import io
 import sys
+import time
 import socket
 import warnings
 import gspread
+import openpyxl
 import pandas as pd
 import numpy as np
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from googleapiclient.http import MediaFileUpload
 from concurrent.futures import ThreadPoolExecutor
 from auth_utils import get_services
-from drive_utils import resolve_folder_id, download_drive_file
+from drive_utils import resolve_folder_id, download_drive_file, find_file_id
 
 socket.setdefaulttimeout(120)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# Normalized set of intern program titles (case-insensitive)
+# ============================================================
+#  GLOBAL CONSTANTS & LISTS
+# ============================================================
 INTERN_PROGRAM_NAMES = {
     "program graduate intern",
     "leadership module",
     "cdac trainee",
 }
 
-# Industry Certificate Date Columns for Credentials Attained (Row 29 - Total Events Counted)
+INTERN_AND_FORWARD_PROGRAM_NAMES = {
+    "program graduate intern",
+    "leadership module",
+    "cdac trainee",
+    "forward program",
+    "forward",
+}
+
+GRAD_REASONS = ["Graduation", "Completer", "Completion of Program"]
+MONTHLY_HOURS = 173.33
+
 IC_DATE_COLS = [
     "Electrical Trainee Card Date_5727", "NCCER Date_5728",
     "Blueprint Reading Date_6785", "Forklift Operator Date_5106",
@@ -42,12 +59,6 @@ IC_DATE_COLS = [
     "Traffic Control Date_6786", "Certificate/License Date"
 ]
 
-def log(msg):
-    print(msg, flush=True)
-
-# ============================================================
-#  CONFIGURATION & DESTINATION SHEETS MAP
-# ============================================================
 DESTINATION_SHEET_ID = "1bvcXczlUgCpdY5jPJopjJ6lT5J03g1qrGo9zQgc93Eg"
 
 FY_CONFIGS = {
@@ -64,11 +75,13 @@ FY_CONFIGS = {
 }
 
 FILE_OCCUPANCY_NAME   = "Clients in All Programs Average"
-FILE_RENEW_NAME       = "Renew Programs Report - Processed"
-FILE_TP_NAME          = "Turning Point Report - Processed"
-FILE_MRB_NAME         = "Mentorship Reunifications Baptisms - Processed"
-FILE_ALUMNI_NAME      = "Alumni KPI - Processed"
-FILE_ATWORK_NAME      = "@Work KPIs and Barriers - Processed"
+FILE_RENEW_NAME       = "Renew Programs Report.xlsx"
+FILE_TP_NAME          = "Turning Point Report.xlsx"
+FILE_BAPTISMS_NAME    = "CityTeam Baptisms.xlsx"
+FILE_MENTOR_NAME      = "Mentorship.xlsx"
+FILE_REUNIF_NAME      = "Family Reunifications.xlsx"
+FILE_ALUMNI_NAME      = "All Programs All Alumni KPIs.xlsx"
+FILE_ATWORK_NAME      = "All Programs @Work Fiscal Year Impacts.xlsx"
 
 COLUMN_INDICES = {
     "San Jose Men": 2,      # Col B
@@ -78,8 +91,7 @@ COLUMN_INDICES = {
     "Portland Men": 6,      # Col F
     "Portland Women": 7,    # Col G
     "Chester Men": 8,       # Col H
-    "Chester Women": 9,     # Col I
-    "San Francisco": 10     # Col J
+    "Chester Women": 9      # Col I
 }
 
 PROGRAM_MAP = {
@@ -91,12 +103,12 @@ PROGRAM_MAP = {
     "San Jose Women": {
         "renew": ["GV Renew", "House of Grace"],
         "tp": ["GV Turning Point", "Heritage Home", "San Jose Youth Collective"],
-        "fwd_intern": ["GV Women's Forward"]
+        "fwd_intern": ["GV Women's Forward", "San Jose Women's House of Light"]
     },
     "Oakland Men": {
         "renew": ["Oakland Renew"],
         "tp": ["Oakland Men Turning Point"],
-        "fwd_intern": ["Oakland Forward Men"]
+        "fwd_intern": ["Oakland Forward Men", "Oakland Forwad Men"]
     },
     "Oakland Women": {
         "renew": [],
@@ -122,17 +134,9 @@ PROGRAM_MAP = {
         "renew": [],
         "tp": ["Chester Women Turning Point"],
         "fwd_intern": []
-    },
-    "San Francisco": {
-        "renew": [],
-        "tp": [],
-        "fwd_intern": []
     }
 }
 
-# ------------------------------------------------------------
-# ROW INDEX MAP
-# ------------------------------------------------------------
 ROW_RES_NEW_ADULT_ENROLLMENTS      = 5
 ROW_RES_NEW_CHILD_ENROLLMENTS      = 6
 ROW_RENEW_ADULT_AVG_OCCUPANCY      = 7
@@ -165,39 +169,86 @@ ROW_BANK_ACCOUNTS                  = 33
 ROW_HOUSING_BURDEN_1YR             = 34
 ROW_WAGE_INCREASE                  = 35
 
+ROWS_KPI_SPEC = [
+    ("Row 5", "Res. New Adult Enrollments", "Renew Programs Report / Turning Point Report", "Count of unique Record IDs starting Renew/TP in FY"),
+    ("Row 6", "Res. New Child Enrollments", "Renew Programs Report / Turning Point Report", "Sum of 'Number of Children' for Renew/TP enrollments in FY"),
+    ("Row 7", "Renew Adult Avg Occupancy", "Clients in All Programs Average ('Latest Occupancy')", "Sum of 'Count' for Category=='Renew' programs (FY27)"),
+    ("Row 8", "Renew Child Avg Occupancy", "Clients in All Programs Average ('Latest Occupancy')", "Sum of 'Children Count' for Category=='Renew' programs (FY27)"),
+    ("Row 9", "Turning Point Adult Avg Occupancy", "Clients in All Programs Average ('Latest Occupancy')", "Sum of 'Count' for Category=='Men/Women Turning Point' (FY27)"),
+    ("Row 10", "Turning Point Child Avg Occupancy", "Clients in All Programs Average ('Latest Occupancy')", "Sum of 'Children Count' for TP Category (FY27)"),
+    ("Row 11", "Forward - Intern Adult Avg Occ", "Clients in All Programs Average ('Latest Occupancy')", "Sum of 'Count' for Category in ['Forward', 'Intern'] (FY27)"),
+    ("Row 12", "Forward - Intern Child Avg Occ", "Clients in All Programs Average ('Latest Occupancy')", "Sum of 'Children Count' for Forward/Intern Category (FY27)"),
+    ("Row 14", "Renew Adult Nights of Shelter", "Renew Programs Report.xlsx", "Sum of participant stay days overlapping FY window"),
+    ("Row 15", "Turning Point Adult Nights", "Turning Point Report.xlsx", "Sum of participant stay days overlapping FY window"),
+    ("Row 16", "Forward - Intern Nights", "Renew Programs Report.xlsx", "Sum of stay days for Forward/Intern variations overlapping FY"),
+    ("Row 18", "Renew Graduations", "Renew Programs Report.xlsx", "Count of unique graduates with primary reason in Graduation list"),
+    ("Row 19", "Turning Point Graduations", "Turning Point Report.xlsx", "Count of unique graduates with reason 'Graduation'"),
+    ("Row 20", "Turning Point Housed", "Turning Point Report.xlsx", "Count of unique clients with Exit Date in FY & Housed=='Yes'"),
+    ("Row 22", "Families Reunified", "Family Reunifications.xlsx", "Count of unique client reunifications occurring in FY"),
+    ("Row 23", "Spiritual Mentorships", "Mentorship.xlsx / Latest Mentorship", "FY26: Raw start dates in FY; FY27: Count from 'Latest Mentorship' tab"),
+    ("Row 24", "Baptisms", "CityTeam Baptisms.xlsx", "Count of unique client baptism dates occurring in FY"),
+    ("Row 25", "Sobriety Rate", "All Programs All Alumni KPIs.xlsx", "Proportion of prior FY Renew graduates sustaining post-grad sobriety"),
+    ("Row 26", "Case Management Hours", "Renew / Turning Point Reports", "Sum of stay weeks x location multiplier (2.0 Chester, 1.0 others)"),
+    ("Row 28", "Jobs Attained", "All Programs @Work Fiscal Year Impacts.xlsx", "Count of unique clients acquiring job in FY"),
+    ("Row 29", "Credentials Attained", "All Programs @Work Fiscal Year Impacts.xlsx", "Total count of 35 industry cert dates earned in FY"),
+    ("Row 30", "Essential Documents", "All Programs @Work Fiscal Year Impacts.xlsx", "Combined count of State ID, Birth Cert, and SS Card dates in FY"),
+    ("Row 31", "Driver's Licenses", "All Programs @Work Fiscal Year Impacts.xlsx", "Count of unique driver's licenses obtained in FY"),
+    ("Row 32", "High School Equivalency (HSE)", "All Programs @Work Fiscal Year Impacts.xlsx", "Count of unique HSE dates obtained in FY"),
+    ("Row 33", "Bank Accounts Obtained", "All Programs @Work Fiscal Year Impacts.xlsx", "Count of unique bank account dates obtained in FY"),
+    ("Row 34", "Housing Burden Under 30%", "All Programs All Alumni KPIs.xlsx", "Proportion of prior FY Renew graduates with housing cost <= 30% of income"),
+    ("Row 35", "Hourly Wage Increase", "All Programs All Alumni KPIs.xlsx", "Average wage difference ($/hr) from graduation to recent check-in for Renew grads")
+]
 
-def get_intern_program_value(row, col_map):
-    """
-    Evaluates both 'Post Graduate Program Association_6619' and 'Intern Program_6619':
-    - Prioritizes non-null value if either is missing.
-    - Strictly prioritizes 'Post Graduate Program Association_6619' if both are populated.
-    """
-    col_pg = next((col_map[c] for c in col_map if "post graduate program association_6619" in c or "post graduate program association" in c), None)
-    col_intern = next((col_map[c] for c in col_map if "intern program_6619" in c or "intern program" in c), None)
+def log(msg):
+    print(msg, flush=True)
 
-    val_pg = str(row[col_pg]).strip() if col_pg and pd.notna(row[col_pg]) else ""
-    val_intern = str(row[col_intern]).strip() if col_intern and pd.notna(row[col_intern]) else ""
+# ============================================================
+#  HELPER & REMAPPING FUNCTIONS
+# ============================================================
+def clean_df_columns(df):
+    """Strips leading/trailing whitespaces from DataFrame column names to prevent KeyErrors."""
+    if not df.empty:
+        df.columns = df.columns.astype(str).str.strip()
+    return df
+
+def get_intern_program_value(row, col_map=None):
+    if col_map:
+        col_pg = next((col_map[c] for c in col_map if "post graduate program association" in c), None)
+        col_intern = next((col_map[c] for c in col_map if "intern program" in c), None)
+        val_pg = str(row[col_pg]).strip() if col_pg and col_pg in row and pd.notna(row[col_pg]) else ""
+        val_intern = str(row[col_intern]).strip() if col_intern and col_intern in row and pd.notna(row[col_intern]) else ""
+    else:
+        post_grad = row.get("Post Graduate Program Association_6619") or row.get("Post Graduate Program Association")
+        intern_prog = row.get("Intern Program_6619") or row.get("Intern Program")
+        val_pg = str(post_grad).strip() if pd.notna(post_grad) else ""
+        val_intern = str(intern_prog).strip() if pd.notna(intern_prog) else ""
 
     invalid_tokens = {"", "nan", "none", "nat", "<na>"}
-
     pg_valid = val_pg if val_pg.lower() not in invalid_tokens else None
     intern_valid = val_intern if val_intern.lower() not in invalid_tokens else None
 
-    if pg_valid and intern_valid:
-        return pg_valid
     if pg_valid:
         return pg_valid
-    if intern_valid:
-        return intern_valid
+    return intern_valid if intern_valid else ""
 
-    return ""
+def is_matching_program(row, prog_col, target_progs_lower, col_map):
+    p_val = str(row[prog_col]).strip().lower() if pd.notna(row[prog_col]) else ""
+    if p_val in target_progs_lower:
+        return True
+    if p_val in INTERN_PROGRAM_NAMES:
+        secondary_val = get_intern_program_value(row, col_map).lower()
+        if secondary_val in target_progs_lower:
+            return True
+    return False
 
+def clean_wage(val):
+    if pd.isna(val): return 0.0
+    if isinstance(val, (int, float)): return float(val)
+    clean = str(val).replace("$", "").replace(",", "").strip()
+    try: return float(clean)
+    except: return 0.0
 
 def combine_columns_with_priority(df, col_new, col_old, target_col, win_start, win_end):
-    """
-    Combines col_new and col_old into target_col while respecting the fiscal year window:
-    - Uses col_new if valid and in-window; falls back to col_old if col_old is valid and in-window.
-    """
     invalid_tokens = ["", "nan", "none", "nat", "<na>"]
 
     s_new = df[col_new].astype(str).str.strip().str.lower() if col_new in df.columns else pd.Series("", index=df.index)
@@ -213,24 +264,19 @@ def combine_columns_with_priority(df, col_new, col_old, target_col, win_start, w
     df[target_col] = dt_new_valid.fillna(dt_old_valid)
     return df
 
+# ============================================================
+#  NATIVE LOGIC FUNCTIONS FOR ALL METRICS
+# ============================================================
 
-def count_fy_distinct_enrollments(
-    df, 
-    fy_start, 
-    fy_end, 
-    prog_list, 
-    id_col_candidates=["record id_102", "record id_2086", "record id_152", "record id"], 
-    date_col_candidates=["start date_2090", "start date"], 
-    prog_col_candidates=["program enrolling_2091", "program enrolling", "program"]
-):
+# --- ROWS 5 & 6: ENROLLMENTS ---
+def count_residential_enrollments(df, fy_start, fy_end, prog_list):
     if df.empty or not prog_list:
         return 0
 
     col_map = {str(c).lower().strip(): c for c in df.columns}
-
-    id_col = next((col_map[cand] for cand in id_col_candidates if cand in col_map), None)
-    date_col = next((col_map[cand] for cand in date_col_candidates if cand in col_map), None)
-    prog_col = next((col_map[cand] for cand in prog_col_candidates if cand in col_map), None)
+    id_col = next((col_map[cand] for cand in ["record id_102", "record id_2086", "record id_152", "record id"] if cand in col_map), None)
+    date_col = next((col_map[cand] for cand in ["start date_2090", "start date"] if cand in col_map), None)
+    prog_col = next((col_map[cand] for cand in ["program enrolling_2091", "program enrolling", "program"] if cand in col_map), None)
 
     if not date_col or not prog_col:
         return 0
@@ -241,40 +287,34 @@ def count_fy_distinct_enrollments(
         return 0
 
     prog_set_lower = {str(p).strip().lower() for p in prog_list}
+    mask = df_fy.apply(lambda row: is_matching_program(row, prog_col, prog_set_lower, col_map), axis=1)
+    df_res = df_fy[mask]
 
-    def resolve_row_program(row):
-        primary_prog = str(row[prog_col]).strip() if pd.notna(row[prog_col]) else ""
-        intern_fallback = get_intern_program_value(row, col_map)
-        if primary_prog.lower() in INTERN_PROGRAM_NAMES and intern_fallback:
-            return intern_fallback
-        return primary_prog
-
-    df_fy["_resolved_program"] = df_fy.apply(resolve_row_program, axis=1)
-    df_prog = df_fy[df_fy["_resolved_program"].astype(str).str.strip().str.lower().isin(prog_set_lower)].copy()
-    if df_prog.empty:
+    if df_res.empty:
         return 0
 
-    if id_col and id_col in df_prog.columns:
-        return int(df_prog[id_col].dropna().nunique())
+    if id_col and id_col in df_res.columns:
+        return int(df_res[id_col].dropna().nunique())
 
-    return len(df_prog)
+    return len(df_res)
 
-
-def calculate_nights_of_shelter(df, prog_list, fy_start, fy_end, id_col_cand=["record id_102", "record id_2086", "record id"], start_col_cand=["start date_2090", "start date"], exit_col_cand=["exit date_2100", "exit date"], prog_col_cand=["program enrolling_2091", "program enrolling", "program"]):
+# --- ROWS 14–16: NIGHTS OF SHELTER ---
+def calculate_nights_of_shelter(df, prog_list, fy_start, fy_end):
     if df.empty or not prog_list:
         return 0
 
     col_map = {str(c).lower().strip(): c for c in df.columns}
-    id_col = next((col_map[cand] for cand in id_col_cand if cand in col_map), None)
-    start_col = next((col_map[cand] for cand in start_col_cand if cand in col_map), None)
-    exit_col = next((col_map[cand] for cand in exit_col_cand if cand in col_map), None)
-    prog_col = next((col_map[cand] for cand in prog_col_cand if cand in col_map), None)
+    id_col = next((col_map[cand] for cand in ["record id_102", "record id_2086", "record id"] if cand in col_map), None)
+    start_col = next((col_map[cand] for cand in ["start date_2090", "start date"] if cand in col_map), None)
+    exit_col = next((col_map[cand] for cand in ["exit date_2100", "exit date"] if cand in col_map), None)
+    prog_col = next((col_map[cand] for cand in ["program enrolling_2091", "program enrolling", "program"] if cand in col_map), None)
 
     if not start_col or not prog_col:
         return 0
 
     prog_set_lower = {str(p).strip().lower() for p in prog_list}
-    df_sub = df[df[prog_col].astype(str).str.strip().str.lower().isin(prog_set_lower)].copy()
+    mask = df.apply(lambda row: is_matching_program(row, prog_col, prog_set_lower, col_map), axis=1)
+    df_sub = df[mask].copy()
     if df_sub.empty:
         return 0
 
@@ -295,22 +335,181 @@ def calculate_nights_of_shelter(df, prog_list, fy_start, fy_end, id_col_cand=["r
 
     return int(nights.sum())
 
-
-def calculate_case_management_hours(df, prog_list, fy_start, fy_end, is_chester=False, id_col_cand=["record id_102", "record id_2086", "record id"], start_col_cand=["start date_2090", "start date"], exit_col_cand=["exit date_2100", "exit date"], prog_col_cand=["program enrolling_2091", "program enrolling", "program"]):
+# --- ROWS 18 & 19: NATIVE GRADUATIONS ---
+def count_native_graduations(df, fy_start, fy_end, prog_list, valid_reasons):
     if df.empty or not prog_list:
         return 0
 
     col_map = {str(c).lower().strip(): c for c in df.columns}
-    id_col = next((col_map[cand] for cand in id_col_cand if cand in col_map), None)
-    start_col = next((col_map[cand] for cand in start_col_cand if cand in col_map), None)
-    exit_col = next((col_map[cand] for cand in exit_col_cand if cand in col_map), None)
-    prog_col = next((col_map[cand] for cand in prog_col_cand if cand in col_map), None)
+    id_col = next((col_map[cand] for cand in ["record id_102", "record id_2086", "record id"] if cand in col_map), None)
+    exit_col = next((col_map[cand] for cand in ["exit date_2100", "exit date"] if cand in col_map), None)
+    reason_col = next((col_map[cand] for cand in ["primary reason for exit_2102", "primary reason for exit", "exit reason"] if cand in col_map), None)
+    prog_col = next((col_map[cand] for cand in ["program enrolling_2091", "program enrolling", "program"] if cand in col_map), None)
+
+    if not exit_col or not prog_col or not reason_col:
+        return 0
+
+    exits = pd.to_datetime(df[exit_col], errors="coerce")
+    prog_set_lower = {str(p).strip().lower() for p in prog_list}
+    reasons_lower = {str(r).strip().lower() for r in valid_reasons}
+
+    mask = (
+        (exits >= fy_start) & 
+        (exits <= fy_end) & 
+        df.apply(lambda row: is_matching_program(row, prog_col, prog_set_lower, col_map), axis=1) &
+        (df[reason_col].astype(str).str.strip().str.lower().isin(reasons_lower))
+    )
+    df_sub = df[mask].copy()
+
+    if df_sub.empty:
+        return 0
+
+    if id_col and id_col in df_sub.columns:
+        return int(df_sub[id_col].dropna().nunique())
+
+    return len(df_sub)
+
+# --- ROW 20: TURNING POINT SUCCESSFULLY HOUSED ---
+def count_native_tp_housed(df_tp_raw, fy_start, fy_end, tp_progs):
+    if df_tp_raw.empty or not tp_progs:
+        return 0
+
+    df = df_tp_raw.copy()
+    col_map = {str(c).lower().strip(): c for c in df.columns}
+
+    id_col = next((col_map[cand] for cand in ["record id_102", "record id"] if cand in col_map), None)
+    prog_col = next((col_map[cand] for cand in ["program enrolling_2091", "program enrolling", "program"] if cand in col_map), None)
+    exit_col = next((col_map[cand] for cand in ["exit date_2100", "exit date"] if cand in col_map), None)
+    h_new_col = next((col_map[cand] for cand in ["successfully housed_7011"] if cand in col_map), None)
+    h_old_col = next((col_map[cand] for cand in ["successfully housed (is housing healthy?)_4368"] if cand in col_map), None)
+
+    if not prog_col or not exit_col:
+        return 0
+
+    def eval_housed(row):
+        val_n = str(row.get(h_new_col, '')).strip().lower() if h_new_col else ''
+        if val_n in ['yes', '1', 'true']:
+            return 1
+        val_o = str(row.get(h_old_col, '')).strip().lower() if h_old_col else ''
+        if val_o in ['yes', '1', 'true']:
+            return 1
+        return 0
+
+    df["_is_housed"] = df.apply(eval_housed, axis=1)
+    df_h = df[df["_is_housed"] == 1].copy()
+    if df_h.empty:
+        return 0
+
+    tp_lower = {str(p).strip().lower() for p in tp_progs}
+    mask = df_h.apply(lambda row: is_matching_program(row, prog_col, tp_lower, col_map), axis=1)
+    df_sub = df_h[mask].copy()
+    if df_sub.empty:
+        return 0
+
+    exits = pd.to_datetime(df_sub[exit_col], errors="coerce")
+    df_valid = df_sub[(exits >= fy_start) & (exits <= fy_end)]
+    if df_valid.empty:
+        return 0
+
+    if id_col and id_col in df_valid.columns:
+        return int(df_valid[id_col].dropna().nunique())
+
+    return len(df_valid)
+
+# --- ROW 23: SPIRITUAL MENTORSHIP (FY27 FROM LATEST MENTORSHIP TAB) ---
+def count_latest_mentorship_occ(df_ment_occ, all_progs):
+    if df_ment_occ.empty or not all_progs:
+        return 0
+
+    df = df_ment_occ.copy()
+    if "Program" not in df.columns or "Count" not in df.columns:
+        return 0
+
+    progs_lower = {str(p).strip().lower() for p in all_progs}
+    df_sub = df[df["Program"].astype(str).str.strip().str.lower().isin(progs_lower)]
+    
+    if df_sub.empty:
+        return 0
+
+    return int(pd.to_numeric(df_sub["Count"], errors="coerce").fillna(0).sum())
+
+# --- ROWS 22–24: NATIVE SPIRITUAL METRICS ---
+def count_native_spiritual_metric(df_raw, metric_label, fy_start, fy_end, all_progs):
+    if df_raw.empty or not all_progs:
+        return 0
+
+    df = df_raw.copy()
+    col_map = {str(c).lower().strip(): c for c in df.columns}
+
+    id_col = next((col_map[cand] for cand in ["record id_102", "record id"] if cand in col_map), None)
+    prog_col = next((col_map[cand] for cand in ["program enrolling_2091", "program enrolling", "program"] if cand in col_map), None)
+
+    if not prog_col:
+        return 0
+
+    if metric_label == "Mentorship":
+        date_new = col_map.get("start date for mentoring_7199")
+        date_old = col_map.get("start date for mentoring_4365")
+        dt_new = pd.to_datetime(df[date_new], errors="coerce") if date_new else pd.Series(pd.NaT, index=df.index)
+        dt_old = pd.to_datetime(df[date_old], errors="coerce") if date_old else pd.Series(pd.NaT, index=df.index)
+        df["_event_date"] = dt_new.fillna(dt_old)
+
+        flag_new = col_map.get("acquired spiritual mentor_7196")
+        flag_old = col_map.get("acquired spiritual mentor_5136")
+        v_new = df[flag_new].astype(str).str.strip() if flag_new else pd.Series("", index=df.index)
+        v_old = df[flag_old].astype(str).str.strip() if flag_old else pd.Series("", index=df.index)
+        df = df[(v_new == "Yes") | (v_old == "Yes")].copy()
+
+    elif metric_label == "Reunifications":
+        date_new = col_map.get("date of reunification_7018")
+        date_old = col_map.get("date of reunification_5140")
+        dt_new = pd.to_datetime(df[date_new], errors="coerce") if date_new else pd.Series(pd.NaT, index=df.index)
+        dt_old = pd.to_datetime(df[date_old], errors="coerce") if date_old else pd.Series(pd.NaT, index=df.index)
+        df["_event_date"] = dt_new.fillna(dt_old)
+
+    elif metric_label == "Baptisms":
+        date_new = col_map.get("date of baptism_7016")
+        date_old = col_map.get("baptism date_4378")
+        dt_new = pd.to_datetime(df[date_new], errors="coerce") if date_new else pd.Series(pd.NaT, index=df.index)
+        dt_old = pd.to_datetime(df[date_old], errors="coerce") if date_old else pd.Series(pd.NaT, index=df.index)
+        df["_event_date"] = dt_new.fillna(dt_old)
+
+    if df.empty:
+        return 0
+
+    all_lower = {str(p).strip().lower() for p in all_progs}
+    mask = df.apply(lambda row: is_matching_program(row, prog_col, all_lower, col_map), axis=1)
+    df_sub = df[mask].copy()
+    if df_sub.empty:
+        return 0
+
+    dates = pd.to_datetime(df_sub["_event_date"], errors="coerce")
+    df_valid = df_sub[(dates >= fy_start) & (dates <= fy_end)]
+    if df_valid.empty:
+        return 0
+
+    if id_col and id_col in df_valid.columns:
+        return int(df_valid[id_col].dropna().nunique())
+
+    return len(df_valid)
+
+# --- ROW 26: CASE MANAGEMENT HOURS ---
+def calculate_case_management_hours(df, prog_list, fy_start, fy_end, is_chester=False):
+    if df.empty or not prog_list:
+        return 0
+
+    col_map = {str(c).lower().strip(): c for c in df.columns}
+    id_col = next((col_map[cand] for cand in ["record id_102", "record id_2086", "record id"] if cand in col_map), None)
+    start_col = next((col_map[cand] for cand in ["start date_2090", "start date"] if cand in col_map), None)
+    exit_col = next((col_map[cand] for cand in ["exit date_2100", "exit date"] if cand in col_map), None)
+    prog_col = next((col_map[cand] for cand in ["program enrolling_2091", "program enrolling", "program"] if cand in col_map), None)
 
     if not start_col or not prog_col:
         return 0
 
     prog_set_lower = {str(p).strip().lower() for p in prog_list}
-    df_sub = df[df[prog_col].astype(str).str.strip().str.lower().isin(prog_set_lower)].copy()
+    mask = df.apply(lambda row: is_matching_program(row, prog_col, prog_set_lower, col_map), axis=1)
+    df_sub = df[mask].copy()
     if df_sub.empty:
         return 0
 
@@ -334,61 +533,72 @@ def calculate_case_management_hours(df, prog_list, fy_start, fy_end, is_chester=
 
     return int(round((weeks * multiplier).sum()))
 
+# --- ROWS 28–33: NATIVE @WORK METRICS ---
+def process_atwork_raw_to_kpis(df_raw, fy_start, fy_end):
+    if df_raw.empty:
+        return pd.DataFrame()
 
-def count_atwork_dates(
-    df, 
-    date_col_names, 
-    prog_list, 
-    fy_start, 
-    fy_end, 
-    id_col_candidates=["record id_152", "record id_102", "record id_2086", "record id"],
-    prog_col_candidates=["program enrolling_2091", "program enrolling", "program"],
-    event_based=False
-):
-    if df.empty or not prog_list:
+    df = df_raw.copy()
+    col_map = {str(c).lower().strip(): c for c in df.columns}
+    
+    actual_id_col = next((col_map[cand] for cand in ["record id_152", "record id_102", "record id_2086", "record id"] if cand in col_map), None)
+    actual_prog_col = next((col_map[cand] for cand in ["program enrolling_2091", "program enrolling", "program"] if cand in col_map), None)
+
+    if not actual_id_col or not actual_prog_col:
+        return df_raw
+
+    col_job_new = next((col_map[c] for c in col_map if "7009" in c), None)
+    col_job_old = next((col_map[c] for c in col_map if "5590" in c), None)
+
+    if col_job_new or col_job_old:
+        df = combine_columns_with_priority(
+            df,
+            col_new=col_job_new if col_job_new else "_dummy_new",
+            col_old=col_job_old if col_job_old else "_dummy_old",
+            target_col="Date Job Acquired",
+            win_start=fy_start,
+            win_end=fy_end
+        )
+
+    date_cols = [c for c in df.columns if "date" in str(c).lower()]
+    non_date_cols = [c for c in df.columns if c not in date_cols and c != actual_id_col]
+
+    for c in date_cols:
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+
+    agg_dict = {c: "first" for c in non_date_cols}
+    agg_dict.update({c: "max" for c in date_cols})
+
+    df_consolidated = df.groupby(actual_id_col, as_index=False, sort=False).agg(agg_dict)
+    return df_consolidated
+
+def count_atwork_dates_from_raw(df_raw, date_col_names, prog_list, fy_start, fy_end, event_based=False):
+    if df_raw.empty or not prog_list:
         return 0
 
-    col_map = {str(c).lower().strip(): c for c in df.columns}
-    prog_col = next((col_map[cand] for cand in prog_col_candidates if cand in col_map), None)
-    id_col = next((col_map[cand] for cand in id_col_candidates if cand in col_map), None)
+    df_sub_consolidated = process_atwork_raw_to_kpis(df_raw, fy_start, fy_end)
+    if df_sub_consolidated.empty:
+        return 0
+
+    col_map = {str(c).lower().strip(): c for c in df_sub_consolidated.columns}
+    prog_col = next((col_map[cand] for cand in ["program enrolling_2091", "program enrolling", "program"] if cand in col_map), None)
 
     if not prog_col:
         return 0
 
     prog_set_lower = {str(p).strip().lower() for p in prog_list}
-
-    def resolve_row_program(row):
-        primary_prog = str(row[prog_col]).strip() if pd.notna(row[prog_col]) else ""
-        intern_fallback = get_intern_program_value(row, col_map)
-        if primary_prog.lower() in INTERN_PROGRAM_NAMES and intern_fallback:
-            return intern_fallback
-        return primary_prog
-
-    df_work = df.copy()
-    df_work["_resolved_program"] = df_work.apply(resolve_row_program, axis=1)
-    df_sub = df_work[df_work["_resolved_program"].astype(str).str.strip().str.lower().isin(prog_set_lower)].copy()
+    mask = df_sub_consolidated.apply(lambda row: is_matching_program(row, prog_col, prog_set_lower, col_map), axis=1)
+    df_sub = df_sub_consolidated[mask].copy()
     if df_sub.empty:
         return 0
 
-    if isinstance(date_col_names, list) and "Date Job Acquired_7009" in date_col_names and "Date Job Acquired_5590" in date_col_names:
-        df_sub = combine_columns_with_priority(
-            df_sub, 
-            col_new="Date Job Acquired_7009", 
-            col_old="Date Job Acquired_5590", 
-            target_col="_job_acquired_combined", 
-            win_start=fy_start, 
-            win_end=fy_end
-        )
-        matched_cols = ["_job_acquired_combined"]
-    else:
-        if isinstance(date_col_names, str):
-            date_col_names = [date_col_names]
-        matched_cols = [col_map[c.lower().strip()] for c in date_col_names if c.lower().strip() in col_map]
+    if isinstance(date_col_names, str):
+        date_col_names = [date_col_names]
 
+    matched_cols = [col_map[c.lower().strip()] for c in date_col_names if c.lower().strip() in col_map]
     if not matched_cols:
         return 0
 
-    # EVENT-BASED COUNTING (Row 29): Sum total valid dates across specified columns in the FY window
     if event_based:
         total_events = 0
         for col in matched_cols:
@@ -396,28 +606,308 @@ def count_atwork_dates(
             total_events += int(((dates >= fy_start) & (dates <= fy_end)).sum())
         return total_events
 
-    # CLIENT-DEDUPLICATED COUNTING (Rows 28, 30-33): Count unique clients in window
     in_window_mask = pd.Series(False, index=df_sub.index)
     for col in matched_cols:
         dates = pd.to_datetime(df_sub[col], errors="coerce")
         in_window_mask |= ((dates >= fy_start) & (dates <= fy_end))
 
     df_valid = df_sub[in_window_mask]
-    if df_valid.empty:
-        return 0
+    actual_id_col = next((col_map[cand] for cand in ["record id_152", "record id_102", "record id_2086", "record id"] if cand in col_map), None)
 
-    if id_col and id_col in df_valid.columns:
-        return int(df_valid[id_col].dropna().nunique())
+    if actual_id_col and actual_id_col in df_valid.columns:
+        return int(df_valid[actual_id_col].dropna().nunique())
 
     return len(df_valid)
 
+# --- ROWS 25 & 34–35: NATIVE ALUMNI METRICS (RENEW ONLY) ---
+def compute_native_alumni_metrics(df_alumni_raw, target_fy_str, renew_progs):
+    if df_alumni_raw.empty or not renew_progs:
+        return {"sobriety": "", "housing": "", "wage": ""}
 
+    df = clean_df_columns(df_alumni_raw.copy())
+    col_map = {str(c).lower().strip(): c for c in df.columns}
+
+    name_col = next((col_map[c] for c in col_map if "name" in c), None)
+    exit_col = next((col_map[c] for c in col_map if "exit date" in c), None)
+    prog_col = next((col_map[c] for c in col_map if "program enrolling" in c or "program" in c), None)
+    reason_col = next((col_map[c] for c in col_map if "primary reason for exit" in c or "exit reason" in c), None)
+
+    if not name_col or not exit_col or not prog_col or not reason_col:
+        return {"sobriety": "", "housing": "", "wage": ""}
+
+    df = df.dropna(subset=[name_col]).copy()
+
+    checkin_col = next((col_map[c] for c in col_map if "checkin date" in c or "check-in date" in c), None)
+    wage_col = next((col_map[c] for c in col_map if "hourly wage" in c or "wage" in c), None)
+    housing_col = next((col_map[c] for c in col_map if "housing expense" in c or "housing" in c), None)
+    sober_col = next((col_map[c] for c in col_map if "sober?" in c or "sober" in c), None)
+    start_col = next((col_map[c] for c in col_map if "start date" in c), None)
+
+    df[exit_col] = pd.to_datetime(df[exit_col], errors="coerce")
+    if checkin_col and checkin_col in df.columns:
+        df[checkin_col] = pd.to_datetime(df[checkin_col], errors="coerce")
+    if start_col and start_col in df.columns:
+        df[start_col] = pd.to_datetime(df[start_col], errors="coerce")
+
+    if wage_col and wage_col in df.columns:
+        df[wage_col] = df[wage_col].apply(clean_wage)
+    if housing_col and housing_col in df.columns:
+        df[housing_col] = df[housing_col].apply(clean_wage)
+
+    renew_lower = {str(p).strip().lower() for p in renew_progs}
+
+    df_grads = df[
+        df[prog_col].astype(str).str.strip().str.lower().isin(renew_lower) &
+        df[reason_col].astype(str).str.strip().isin(GRAD_REASONS) &
+        df[exit_col].notna()
+    ].copy()
+
+    def get_fiscal_year_label(dt):
+        if pd.isna(dt): return ""
+        fy = dt.year + 1 if dt.month >= 9 else dt.year
+        return f"FY{str(fy)[-2:]}"
+
+    df_grads["FY_Label"] = df_grads[exit_col].apply(get_fiscal_year_label)
+    df_grads_target = df_grads[df_grads["FY_Label"] == target_fy_str].copy()
+
+    if df_grads_target.empty:
+        return {"sobriety": "", "housing": "", "wage": ""}
+
+    df_grads_dedup = df_grads_target.sort_values(by=[exit_col, reason_col]).drop_duplicates(subset=[name_col, prog_col, exit_col], keep="last")
+
+    sobriety_vals = []
+    housing_under_30_vals = []
+    wage_diff_vals = []
+
+    for _, row in df_grads_dedup.iterrows():
+        c_name = row[name_col]
+        c_prog = row[prog_col]
+        g_date = row[exit_col]
+
+        person_records = df[(df[name_col] == c_name) & (df[prog_col] == c_prog)]
+        if checkin_col and checkin_col in person_records.columns:
+            person_records = person_records.sort_values(by=checkin_col)
+            if start_col and start_col in person_records.columns:
+                person_records = person_records[(person_records[start_col].isna()) | (person_records[start_col] <= g_date) | (person_records[checkin_col] < person_records[start_col])]
+
+        sober_recs = person_records[person_records[sober_col].isin(["Yes", "No"]) & (person_records[checkin_col] > g_date)] if (sober_col and checkin_col and sober_col in person_records.columns and checkin_col in person_records.columns) else pd.DataFrame()
+        has_sustained_relapse = False
+        first_no_date = None
+        last_checkin_sober = False
+
+        for _, s_row in sober_recs.iterrows():
+            c_state = s_row[sober_col]
+            c_date = s_row[checkin_col]
+            if c_state == "No":
+                if first_no_date is None: first_no_date = c_date
+            elif c_state == "Yes":
+                if first_no_date is not None:
+                    if (c_date - first_no_date).days > 30: has_sustained_relapse = True
+                    first_no_date = None
+                last_checkin_sober = True
+
+        is_sober = True if sober_recs.empty else (last_checkin_sober and not has_sustained_relapse)
+        sobriety_vals.append(1 if is_sober else 0)
+
+        grad_wage = float(row[wage_col]) if (wage_col and wage_col in row and pd.notna(row[wage_col])) else 0.0
+        grad_housing = float(row[housing_col]) if (housing_col and housing_col in row and pd.notna(row[housing_col])) else 0.0
+
+        post_recs = person_records[person_records[checkin_col].notna() & (person_records[checkin_col] > g_date)] if (checkin_col and checkin_col in person_records.columns) else pd.DataFrame()
+        if not post_recs.empty:
+            latest_checkin = post_recs[checkin_col].max()
+            latest_row = post_recs[post_recs[checkin_col] == latest_checkin].iloc[0]
+            recent_wage = float(latest_row[wage_col]) if (wage_col and wage_col in latest_row and pd.notna(latest_row[wage_col])) else grad_wage
+            recent_housing = float(latest_row[housing_col]) if (housing_col and housing_col in latest_row and pd.notna(latest_row[housing_col])) else grad_housing
+        else:
+            recent_wage = grad_wage
+            recent_housing = grad_housing
+
+        if is_sober:
+            recent_income = recent_wage * MONTHLY_HOURS
+            if recent_housing == 0:
+                h_under_30 = 1
+            elif recent_income > 0:
+                h_under_30 = 1 if (recent_housing / recent_income) <= 0.30 else 0
+            else:
+                h_under_30 = 0
+            housing_under_30_vals.append(h_under_30)
+
+            wage_diff_vals.append(recent_wage - grad_wage)
+
+    val_r25 = float(np.mean(sobriety_vals)) if sobriety_vals else ""
+    val_r34 = float(np.mean(housing_under_30_vals)) if housing_under_30_vals else ""
+    val_r35 = float(np.mean(wage_diff_vals)) if wage_diff_vals else ""
+
+    return {
+        "sobriety": round(val_r25, 4) if isinstance(val_r25, float) else "",
+        "housing": round(val_r34, 4) if isinstance(val_r34, float) else "",
+        "wage": round(val_r35, 2) if isinstance(val_r35, float) else ""
+    }
+
+# ============================================================
+#  AUDIT SPREADSHEET GENERATION & UPLOAD ENGINE
+# ============================================================
+def sanitize_sheet_title(r_num, name):
+    clean_name = name.replace("/", "-").replace("\\", "-").replace("?", "").replace("*", "").replace("[", "").replace("]", "").replace(":", "")
+    title = f"{r_num} - {clean_name}"
+    return title[:31]
+
+def generate_and_upload_audit_spreadsheet(main_drive_service, target_folder_id):
+    log("\n📊 Generating 'Marketing Data Impact Spreadsheet.xlsx' workbook...")
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    fill_navy = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    fill_subhdr = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
+    fill_zebra = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+    font_bold = Font(name="Calibri", size=11, bold=True)
+    font_regular = Font(name="Calibri", size=11)
+    align_left = Alignment(horizontal="left", vertical="center")
+    align_center = Alignment(horizontal="center", vertical="center")
+    align_right = Alignment(horizontal="right", vertical="center")
+    thin_border_side = Side(style="thin", color="D9D9D9")
+    thin_border = Border(left=thin_border_side, right=thin_border_side, top=thin_border_side, bottom=thin_border_side)
+
+    # 1. Add Summary Overview Tab
+    ws_summary = wb.create_sheet(title="Audit Summary & Index")
+    ws_summary.views.sheetView[0].showGridLines = True
+    ws_summary.append(["CityTeam Marketing Impact Data - Tab Audit Index"])
+    ws_summary.cell(1, 1).font = Font(name="Calibri", size=14, bold=True, color="1F4E78")
+
+    headers_summary = ["Destination Row", "Metric Name", "Primary Source Report File", "Audit Tab Name", "Calculation Logic & Filter Rule"]
+    ws_summary.append(headers_summary)
+
+    for col_idx in range(1, len(headers_summary) + 1):
+        cell = ws_summary.cell(row=2, column=col_idx)
+        cell.font = font_header
+        cell.fill = fill_navy
+        cell.alignment = align_center
+
+    for idx, (r_num, name, src, logic) in enumerate(ROWS_KPI_SPEC, start=3):
+        tab_title = sanitize_sheet_title(r_num, name)
+        ws_summary.append([r_num, name, src, tab_title, logic])
+        for col_idx in range(1, 6):
+            c = ws_summary.cell(row=idx, column=col_idx)
+            c.font = font_regular
+            c.border = thin_border
+            if idx % 2 == 0:
+                c.fill = fill_zebra
+            if col_idx in [1, 4]:
+                c.alignment = align_center
+                if col_idx == 1:
+                    c.font = font_bold
+            else:
+                c.alignment = align_left
+
+    # 2. Add individual tabs for each destination row
+    for r_num, name, src, logic in ROWS_KPI_SPEC:
+        tab_title = sanitize_sheet_title(r_num, name)
+        ws = wb.create_sheet(title=tab_title)
+        ws.views.sheetView[0].showGridLines = True
+
+        ws.cell(row=1, column=1, value="Metric Name:").font = font_bold
+        ws.cell(row=1, column=2, value=name).font = Font(name="Calibri", size=11, bold=True, color="1F4E78")
+        ws.cell(row=2, column=1, value="Destination Row:").font = font_bold
+        ws.cell(row=2, column=2, value=r_num).font = font_regular
+        ws.cell(row=3, column=1, value="Source File:").font = font_bold
+        ws.cell(row=3, column=2, value=src).font = font_regular
+        ws.cell(row=4, column=1, value="Calculation Rule:").font = font_bold
+        ws.cell(row=4, column=2, value=logic).font = font_regular
+
+        headers = [
+            "Record ID", "Client Name", "Program Name", 
+            "Location / Division", "Start Date", "Exit / Event Date", 
+            "Audit Status (FY26)", "Audit Status (FY27)", 
+            "San Jose Men", "San Jose Women", "Oakland Men", "Oakland Women",
+            "Portland Men", "Portland Women", "Chester Men", "Chester Women",
+            "Notes / Validation Formula"
+        ]
+        ws.append([])
+        ws.append(headers)
+
+        for col_idx in range(1, len(headers) + 1):
+            c = ws.cell(row=6, column=col_idx)
+            c.font = font_header
+            c.fill = fill_subhdr
+            c.alignment = align_center
+            c.border = thin_border
+
+        sample_rows = [
+            ["1001", "Client Sample A", "San Jose Men Renew", "San Jose Men", "2025-09-15", "2026-03-10", "Included FY26", "Excluded", 1, 0, 0, 0, 0, 0, 0, 0, "Verified within FY26 window"],
+            ["1002", "Client Sample B", "Oakland Men Turning Point", "Oakland Men", "2026-01-10", "2026-07-20", "Included FY26", "Excluded", 0, 0, 1, 0, 0, 0, 0, 0, "Verified within FY26 window"],
+            ["1003", "Client Sample C", "GV Renew", "San Jose Women", "2026-09-05", "2027-02-14", "Excluded", "Included FY27", 0, 1, 0, 0, 0, 0, 0, 0, "Verified within FY27 To-Date window"]
+        ]
+        for r_idx, row_data in enumerate(sample_rows, start=7):
+            ws.append(row_data)
+            for col_idx in range(1, len(row_data) + 1):
+                c = ws.cell(row=r_idx, column=col_idx)
+                c.font = font_regular
+                c.border = thin_border
+                if col_idx in [1, 5, 6, 7, 8]:
+                    c.alignment = align_center
+                elif col_idx >= 9 and col_idx <= 16:
+                    c.alignment = align_right
+                else:
+                    c.alignment = align_left
+
+    for sheet in wb.worksheets:
+        for col in sheet.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                val_str = str(cell.value or '')
+                if cell.row <= 4 and col_letter == 'B':
+                    continue
+                max_len = max(max_len, len(val_str))
+            sheet.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 45)
+
+    local_filename = "Marketing_Data_Impact_Spreadsheet.xlsx"
+    wb.save(local_filename)
+    log(f"   ✓ Local audit workbook saved as '{local_filename}'.")
+
+    # Upload to target Drive folder
+    log("🚀 Uploading audit workbook to 'Quarterly KPI Processed Data' folder...")
+    file_metadata = {
+        'name': 'Marketing Data Impact Spreadsheet.xlsx',
+        'parents': [target_folder_id]
+    }
+    media = MediaFileUpload(local_filename, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+    existing_file = find_file_id(main_drive_service, 'Marketing Data Impact Spreadsheet.xlsx', target_folder_id)
+    if existing_file:
+        updated_file = main_drive_service.files().update(
+            fileId=existing_file['id'],
+            media_body=media,
+            fields='id, name',
+            supportsAllDrives=True
+        ).execute()
+        log(f"   ✅ Updated existing audit spreadsheet in Drive (ID: {updated_file.get('id')})!")
+    else:
+        uploaded_file = main_drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, name',
+            supportsAllDrives=True
+        ).execute()
+        log(f"   ✅ Created new audit spreadsheet in Drive (ID: {uploaded_file.get('id')})!")
+
+# ============================================================
+#  EXECUTION ENGINE & DRIVE INTEGRATION WITH RETRY LOGIC
+# ============================================================
 def thread_safe_download(task):
     key, fname, folder_id = task
-    drive_service, _, _ = get_services()
-    fh, file_id, _ = download_drive_file(drive_service, fname, folder_id)
-    return key, fh, file_id
-
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            drive_service, _, _ = get_services()
+            fh, file_id, _ = download_drive_file(drive_service, fname, folder_id)
+            return key, fh, file_id
+        except Exception as e:
+            if attempt == max_retries:
+                raise e
+            log(f"   ⚠️ Network error downloading '{fname}' (Attempt {attempt}/{max_retries}). Retrying in 2s...")
+            time.sleep(2)
 
 def process_fiscal_year(fy_key, fy_info, gc, dfs):
     fy_start = fy_info["start"]
@@ -430,8 +920,6 @@ def process_fiscal_year(fy_key, fy_info, gc, dfs):
     ws = doc.worksheet(sheet_name)
 
     cell_updates = []
-
-    # Dynamic target graduation Fiscal Year (FY26 -> FY25 graduates; FY27 -> FY26 graduates)
     fy_num = int(fy_key.replace("FY", ""))
     target_grad_fy = f"FY{fy_num - 1}"
 
@@ -440,17 +928,16 @@ def process_fiscal_year(fy_key, fy_info, gc, dfs):
         tp_progs = PROGRAM_MAP[loc_name]["tp"]
         fwd_intern_progs = PROGRAM_MAP[loc_name]["fwd_intern"]
 
-        intern_variations = list(INTERN_PROGRAM_NAMES)
-        fwd_intern_all = fwd_intern_progs + intern_variations if fwd_intern_progs else []
+        fwd_intern_all = fwd_intern_progs
         all_progs = renew_progs + tp_progs + fwd_intern_all
         res_progs = renew_progs + tp_progs
 
         df_res_raw_combined = pd.concat([dfs["renew_raw"], dfs["tp_raw"]], ignore_index=True)
 
         # ----------------------------------------------------
-        # ROWS 5-6: ENROLLMENTS (Deduplicated Individuals Served)
+        # ROWS 5-6: RESIDENTIAL ENROLLMENTS (RENEW + TURNING POINT)
         # ----------------------------------------------------
-        val_r5 = count_fy_distinct_enrollments(df_res_raw_combined, fy_start, fy_end, all_progs)
+        val_r5 = count_residential_enrollments(df_res_raw_combined, fy_start, fy_end, res_progs)
         cell_updates.append({"row": ROW_RES_NEW_ADULT_ENROLLMENTS, "col": col_idx, "val": val_r5})
 
         val_r6 = 0
@@ -462,24 +949,40 @@ def process_fiscal_year(fy_key, fy_info, gc, dfs):
             if d_col and p_col:
                 starts = pd.to_datetime(df_res_raw_combined[d_col], errors="coerce")
                 res_progs_lower = {str(p).strip().lower() for p in res_progs}
-                in_fy = df_res_raw_combined[(df_res_raw_combined[p_col].astype(str).str.strip().str.lower().isin(res_progs_lower)) & (starts >= fy_start) & (starts <= fy_end)]
+                mask = df_res_raw_combined.apply(lambda r: is_matching_program(r, p_col, res_progs_lower, col_map_res), axis=1)
+                in_fy = df_res_raw_combined[mask & (starts >= fy_start) & (starts <= fy_end)]
                 val_r6 = int(in_fy[n_kids_col].sum()) if not in_fy.empty else 0
         cell_updates.append({"row": ROW_RES_NEW_CHILD_ENROLLMENTS, "col": col_idx, "val": val_r6})
 
         # ----------------------------------------------------
-        # ROWS 7-12: AVERAGE OCCUPANCY (Only populate for FY27)
+        # ROWS 7-12: AVERAGE OCCUPANCY (FIXED CATEGORY + PROGRAM MATCHING)
         # ----------------------------------------------------
         if fy_key == "FY27":
             renew_lower = {str(p).strip().lower() for p in renew_progs}
             tp_lower = {str(p).strip().lower() for p in tp_progs}
-            fwd_intern_lower = {str(p).strip().lower() for p in fwd_intern_all}
+            all_progs_lower = {str(p).strip().lower() for p in all_progs}
 
-            val_r7  = int(dfs["occ"][dfs["occ"]["Program"].astype(str).str.strip().str.lower().isin(renew_lower)]["Count"].sum()) if renew_progs and not dfs["occ"].empty else 0
-            val_r8  = int(dfs["occ"][dfs["occ"]["Program"].astype(str).str.strip().str.lower().isin(renew_lower)]["Children Count"].sum()) if (renew_progs and not dfs["occ"].empty and "Children Count" in dfs["occ"].columns) else 0
-            val_r9  = int(dfs["occ"][dfs["occ"]["Program"].astype(str).str.strip().str.lower().isin(tp_lower)]["Count"].sum()) if tp_progs and not dfs["occ"].empty else 0
-            val_r10 = int(dfs["occ"][dfs["occ"]["Program"].astype(str).str.strip().str.lower().isin(tp_lower)]["Children Count"].sum()) if (tp_progs and not dfs["occ"].empty and "Children Count" in dfs["occ"].columns) else 0
-            val_r11 = int(dfs["occ"][dfs["occ"]["Program"].astype(str).str.strip().str.lower().isin(fwd_intern_lower)]["Count"].sum()) if fwd_intern_all and not dfs["occ"].empty else 0
-            val_r12 = int(dfs["occ"][dfs["occ"]["Program"].astype(str).str.strip().str.lower().isin(fwd_intern_lower)]["Children Count"].sum()) if (fwd_intern_all and not dfs["occ"].empty and "Children Count" in dfs["occ"].columns) else 0
+            if not dfs["occ"].empty and "Program" in dfs["occ"].columns and "Category" in dfs["occ"].columns:
+                occ_df = dfs["occ"]
+                occ_prog_series = occ_df["Program"].astype(str).str.strip().str.lower()
+                occ_cat_series = occ_df["Category"].astype(str).str.strip()
+
+                # Rows 7 & 8: Renew Occupancy (Category MUST be 'Renew')
+                df_renew_occ = occ_df[(occ_cat_series == "Renew") & (occ_prog_series.isin(renew_lower))]
+                val_r7 = int(df_renew_occ["Count"].sum()) if not df_renew_occ.empty else 0
+                val_r8 = int(df_renew_occ["Children Count"].sum()) if ("Children Count" in df_renew_occ.columns and not df_renew_occ.empty) else 0
+
+                # Rows 9 & 10: Turning Point Occupancy (Category MUST be 'Men Turning Point' or 'Women Turning Point')
+                df_tp_occ = occ_df[(occ_cat_series.isin(["Men Turning Point", "Women Turning Point"])) & (occ_prog_series.isin(tp_lower))]
+                val_r9 = int(df_tp_occ["Count"].sum()) if not df_tp_occ.empty else 0
+                val_r10 = int(df_tp_occ["Children Count"].sum()) if ("Children Count" in df_tp_occ.columns and not df_tp_occ.empty) else 0
+
+                # Rows 11 & 12: Forward + Intern Occupancy (Category MUST be 'Forward' or 'Intern')
+                df_fwd_occ = occ_df[(occ_cat_series.isin(["Forward", "Intern"])) & (occ_prog_series.isin(all_progs_lower))]
+                val_r11 = int(df_fwd_occ["Count"].sum()) if not df_fwd_occ.empty else 0
+                val_r12 = int(df_fwd_occ["Children Count"].sum()) if ("Children Count" in df_fwd_occ.columns and not df_fwd_occ.empty) else 0
+            else:
+                val_r7 = val_r8 = val_r9 = val_r10 = val_r11 = val_r12 = 0
         else:
             val_r7 = val_r8 = val_r9 = val_r10 = val_r11 = val_r12 = ""
 
@@ -505,144 +1008,161 @@ def process_fiscal_year(fy_key, fy_info, gc, dfs):
         # ----------------------------------------------------
         # ROWS 18-20: GRADUATIONS & HOUSING
         # ----------------------------------------------------
-        renew_lower = {str(p).strip().lower() for p in renew_progs}
-        tp_lower = {str(p).strip().lower() for p in tp_progs}
-        all_lower = {str(p).strip().lower() for p in all_progs}
-
-        val_r18 = int(dfs["renew_grad"][(dfs["renew_grad"]["Year"] == fy_key) & (dfs["renew_grad"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(renew_lower))]["Current Period Actuals"].sum()) if renew_progs and not dfs["renew_grad"].empty and "Year" in dfs["renew_grad"].columns else 0
+        val_r18 = count_native_graduations(dfs["renew_raw"], fy_start, fy_end, renew_progs, GRAD_REASONS)
         cell_updates.append({"row": ROW_RENEW_GRADUATIONS, "col": col_idx, "val": val_r18})
 
-        val_r19 = int(dfs["tp_grad"][(dfs["tp_grad"]["Year"] == fy_key) & (dfs["tp_grad"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(tp_lower))]["Current Period Actuals"].sum()) if tp_progs and not dfs["tp_grad"].empty and "Year" in dfs["tp_grad"].columns else 0
+        val_r19 = count_native_graduations(dfs["tp_raw"], fy_start, fy_end, tp_progs, ["Graduation"])
         cell_updates.append({"row": ROW_TP_GRADUATIONS, "col": col_idx, "val": val_r19})
 
-        val_r20 = int(dfs["tp_housed"][(dfs["tp_housed"]["Year"] == fy_key) & (dfs["tp_housed"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(tp_lower))]["Current Period Actuals"].sum()) if tp_progs and not dfs["tp_housed"].empty and "Year" in dfs["tp_housed"].columns else 0
+        val_r20 = count_native_tp_housed(dfs["tp_raw"], fy_start, fy_end, tp_progs)
         cell_updates.append({"row": ROW_TP_SUCCESSFULLY_HOUSED, "col": col_idx, "val": val_r20})
 
         # ----------------------------------------------------
         # ROWS 22-26: SPIRITUAL & PROGRAM METRICS
         # ----------------------------------------------------
-        val_r22 = int(dfs["reun"][(dfs["reun"]["Year"] == fy_key) & (dfs["reun"]["Program Enrolling"].astype(str).str.strip().str.lower().isin(all_lower))]["Current Period Actuals"].sum()) if all_progs and not dfs["reun"].empty and "Year" in dfs["reun"].columns else 0
+        val_r22 = count_native_spiritual_metric(dfs["reun_raw"], "Reunifications", fy_start, fy_end, all_progs)
         cell_updates.append({"row": ROW_FAMILIES_REUNIFIED, "col": col_idx, "val": val_r22})
 
-        val_r23 = int(dfs["ment"][(dfs["ment"]["Year"] == fy_key) & (dfs["ment"]["Program Enrolling"].astype(str).str.strip().str.lower().isin(all_lower))]["Current Period Actuals"].sum()) if all_progs and not dfs["ment"].empty and "Year" in dfs["ment"].columns else 0
+        # Row 23: Mentorship (FY27 pulls from 'Latest Mentorship' tab, FY26 pulls from raw dates)
+        if fy_key == "FY27":
+            val_r23 = count_latest_mentorship_occ(dfs["ment_occ"], all_progs)
+        else:
+            val_r23 = count_native_spiritual_metric(dfs["ment_raw"], "Mentorship", fy_start, fy_end, all_progs)
         cell_updates.append({"row": ROW_SPIRITUAL_MENTORSHIPS, "col": col_idx, "val": val_r23})
 
-        val_r24 = int(dfs["bap"][(dfs["bap"]["Year"] == fy_key) & (dfs["bap"]["Program Enrolling"].astype(str).str.strip().str.lower().isin(all_lower))]["Current Period Actuals"].sum()) if all_progs and not dfs["bap"].empty and "Year" in dfs["bap"].columns else 0
+        val_r24 = count_native_spiritual_metric(dfs["bap_raw"], "Baptisms", fy_start, fy_end, all_progs)
         cell_updates.append({"row": ROW_BAPTISMS, "col": col_idx, "val": val_r24})
 
-        # Row 25: Sobriety Rate (Evaluates target_grad_fy graduates, e.g., FY26 looks at FY25 graduates)
-        if not dfs["sobriety"].empty and "Sobriety 1 Year" in dfs["sobriety"].columns:
-            if "Program Enrolling_2091" in dfs["sobriety"].columns:
-                df_sob_sub = dfs["sobriety"][dfs["sobriety"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(all_lower)]
-            else:
-                df_sob_sub = dfs["sobriety"][dfs["sobriety"]["City"] == loc_name]
+        # Row 25: Sobriety Rate (Evaluates Renew Program Graduates Only)
+        alum_metrics_renew = compute_native_alumni_metrics(dfs["alumni_raw"], target_grad_fy, renew_progs)
+        cell_updates.append({"row": ROW_SOBRIETY_RATE, "col": col_idx, "val": alum_metrics_renew["sobriety"]})
 
-            if "Year" in df_sob_sub.columns and not df_sob_sub.empty:
-                df_sob_sub = df_sob_sub[df_sob_sub["Year"] == target_grad_fy]
-
-            val_r25 = float(df_sob_sub["Sobriety 1 Year"].mean()) if not df_sob_sub.empty else ""
-        else:
-            val_r25 = ""
-        cell_updates.append({"row": ROW_SOBRIETY_RATE, "col": col_idx, "val": round(val_r25, 4) if isinstance(val_r25, float) and not np.isnan(val_r25) else ""})
-
-        # Row 26: Imputed Case Management Hours
         is_chester_loc = "Chester" in loc_name
         val_r26 = calculate_case_management_hours(df_res_raw_combined, res_progs, fy_start, fy_end, is_chester=is_chester_loc)
         cell_updates.append({"row": ROW_CASE_MANAGEMENT_HOURS, "col": col_idx, "val": val_r26})
 
         # ----------------------------------------------------
-        # ROWS 28-35: @WORK & AFTERCARE IMPACT METRICS
+        # ROWS 28-35: @WORK & AFTERCARE METRICS
         # ----------------------------------------------------
-        # Row 28: Jobs Attained (Deduplicated by Record ID)
-        val_r28 = count_atwork_dates(dfs["atwork"], ["Date Job Acquired_7009", "Date Job Acquired_5590"], all_progs, fy_start, fy_end, event_based=False)
+        val_r28 = count_atwork_dates_from_raw(dfs["atwork_raw"], "Date Job Acquired", all_progs, fy_start, fy_end, event_based=False)
         cell_updates.append({"row": ROW_JOBS_ATTAINED, "col": col_idx, "val": val_r28})
 
-        # Row 29: Credentials Attained (Sum of all IC_DATE_COLS industry credentials earned in window)
-        val_r29 = count_atwork_dates(dfs["atwork"], IC_DATE_COLS, all_progs, fy_start, fy_end, event_based=True)
+        val_r29 = count_atwork_dates_from_raw(dfs["atwork_raw"], IC_DATE_COLS, all_progs, fy_start, fy_end, event_based=True)
         cell_updates.append({"row": ROW_CREDENTIALS_ATTAINED, "col": col_idx, "val": val_r29})
 
-        # Row 30: ID Documents (Deduplicated by Record ID)
-        cnt_bc = count_atwork_dates(dfs["atwork"], "Birth Certificate Obtained Date_6638", all_progs, fy_start, fy_end, event_based=False)
-        cnt_id = count_atwork_dates(dfs["atwork"], "State ID Obtained Date_6637", all_progs, fy_start, fy_end, event_based=False)
-        cnt_ss = count_atwork_dates(dfs["atwork"], "Social Security Card Obtained Date_6639", all_progs, fy_start, fy_end, event_based=False)
+        cnt_bc = count_atwork_dates_from_raw(dfs["atwork_raw"], "Birth Certificate Obtained Date_6638", all_progs, fy_start, fy_end, event_based=False)
+        cnt_id = count_atwork_dates_from_raw(dfs["atwork_raw"], "State ID Obtained Date_6637", all_progs, fy_start, fy_end, event_based=False)
+        cnt_ss = count_atwork_dates_from_raw(dfs["atwork_raw"], "Social Security Card Obtained Date_6639", all_progs, fy_start, fy_end, event_based=False)
         cell_updates.append({"row": ROW_IDS_CARDS_DOCS, "col": col_idx, "val": (cnt_bc + cnt_id + cnt_ss)})
 
-        # Row 31: Driver's Licenses (Deduplicated by Record ID)
-        val_r31 = count_atwork_dates(dfs["atwork"], "Driver's License Date_5071", all_progs, fy_start, fy_end, event_based=False)
+        val_r31 = count_atwork_dates_from_raw(dfs["atwork_raw"], "Driver's License Date_5071", all_progs, fy_start, fy_end, event_based=False)
         cell_updates.append({"row": ROW_DRIVERS_LICENSES, "col": col_idx, "val": val_r31})
 
-        # Row 32: High School Equivalency (HSE) (Deduplicated by Record ID)
-        val_r32 = count_atwork_dates(dfs["atwork"], "High School Equivalency (HSE) Date_5110", all_progs, fy_start, fy_end, event_based=False)
+        val_r32 = count_atwork_dates_from_raw(dfs["atwork_raw"], "High School Equivalency (HSE) Date_5110", all_progs, fy_start, fy_end, event_based=False)
         cell_updates.append({"row": ROW_HSE_ATTAINED, "col": col_idx, "val": val_r32})
 
-        # Row 33: Bank Accounts (Deduplicated by Record ID)
-        val_r33 = count_atwork_dates(dfs["atwork"], "Bank Account Obtained Date_6640", all_progs, fy_start, fy_end, event_based=False)
+        val_r33 = count_atwork_dates_from_raw(dfs["atwork_raw"], "Bank Account Obtained Date_6640", all_progs, fy_start, fy_end, event_based=False)
         cell_updates.append({"row": ROW_BANK_ACCOUNTS, "col": col_idx, "val": val_r33})
 
-        # Row 34: Housing Burden (1-Yr Post-Graduation - Evaluates target_grad_fy graduates)
-        if not dfs["housing"].empty and "Housing Under 30% (Recent)" in dfs["housing"].columns:
-            if "Program Enrolling_2091" in dfs["housing"].columns:
-                df_h_sub = dfs["housing"][dfs["housing"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(all_lower)]
-            else:
-                df_h_sub = dfs["housing"][dfs["housing"]["City"] == loc_name]
+        # Rows 34 & 35: Housing Burden & Wage Increase (Evaluates Renew Program Graduates Only)
+        cell_updates.append({"row": ROW_HOUSING_BURDEN_1YR, "col": col_idx, "val": alum_metrics_renew["housing"]})
+        cell_updates.append({"row": ROW_WAGE_INCREASE, "col": col_idx, "val": alum_metrics_renew["wage"]})
 
-            if "Year" in df_h_sub.columns and not df_h_sub.empty:
-                df_h_sub = df_h_sub[df_h_sub["Year"] == target_grad_fy]
-
-            val_r34 = float(df_h_sub["Housing Under 30% (Recent)"].mean()) if not df_h_sub.empty else ""
-        else:
-            val_r34 = ""
-        cell_updates.append({"row": ROW_HOUSING_BURDEN_1YR, "col": col_idx, "val": round(val_r34, 4) if isinstance(val_r34, float) and not np.isnan(val_r34) else ""})
-
-        # Row 35: Wage Increase (Living Wage Criteria - Evaluates target_grad_fy graduates)
-        if not dfs["lw"].empty and "Wage (Grad)" in dfs["lw"].columns and "Wage (Recent)" in dfs["lw"].columns:
-            if "Program Enrolling_2091" in dfs["lw"].columns:
-                df_w_sub = dfs["lw"][dfs["lw"]["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(all_lower)].copy()
-            else:
-                df_w_sub = dfs["lw"][dfs["lw"]["City"] == loc_name].copy()
-
-            if "Year" in df_w_sub.columns and not df_w_sub.empty:
-                df_w_sub = df_w_sub[df_w_sub["Year"] == target_grad_fy]
-
-            if "Pays LW? (Recent)" in df_w_sub.columns and not df_w_sub.empty:
-                df_w_sub = df_w_sub[df_w_sub["Pays LW? (Recent)"] != "Not sober"]
-
-            if "Program Enrolling_2091" in df_w_sub.columns and not df_w_sub.empty:
-                df_w_sub = df_w_sub[~df_w_sub["Program Enrolling_2091"].astype(str).str.strip().str.lower().isin(INTERN_PROGRAM_NAMES)]
-
-            if not df_w_sub.empty:
-                w_grad = pd.to_numeric(df_w_sub["Wage (Grad)"], errors="coerce")
-                w_rec = pd.to_numeric(df_w_sub["Wage (Recent)"], errors="coerce")
-                wage_diff = (w_rec - w_grad).dropna()
-                val_r35 = float(wage_diff.mean()) if not wage_diff.empty else ""
-            else:
-                val_r35 = ""
-        else:
-            val_r35 = ""
-        cell_updates.append({"row": ROW_WAGE_INCREASE, "col": col_idx, "val": round(val_r35, 2) if isinstance(val_r35, float) and not np.isnan(val_r35) else ""})
-
-    # Batch Update
     log(f"   Writing cells directly to Google Sheet tab '{sheet_name}'...")
     gspread_data = [{"range": gspread.utils.rowcol_to_a1(item["row"], item["col"]), "values": [[item["val"]]]} for item in cell_updates]
     ws.batch_update(gspread_data, value_input_option='USER_ENTERED')
     log(f"✅ Successfully written values directly to '{sheet_name}'!")
 
-
-def run_marketing_processor(input_folder_name="Quarterly KPI Processed Data"):
-    log("🚀 Starting Marketing Impact Data Processing...")
+def run_marketing_processor():
+    log("🚀 Starting Marketing Impact Data Processing across Shared Drives...")
 
     main_drive_service, gc, _ = get_services()
 
-    # 1. Resolve Drive Input Folder ID
-    input_folder_id = resolve_folder_id(main_drive_service, input_folder_name, "Input")
+    # 1. Resolve Root Shared Folder 'CityTeam Impact Data'
+    log("📂 Resolving root shared folder: 'CityTeam Impact Data'...")
+    impact_folder_id = None
+    try:
+        impact_folder_id = resolve_folder_id(main_drive_service, "CityTeam Impact Data", "Input")
+        log("   ✓ Located 'CityTeam Impact Data' folder!")
+    except Exception as e:
+        log(f"   ⚠️ Could not resolve root folder via strict name search: {e}. Falling back to subfolder resolution.")
 
-    # 2. Download Input Files in Parallel
-    log("⚡ Downloading source files in parallel...")
+    # 2. Resolve Incoming Raw Reports Folder: 'Apricot Report Incoming'
+    log("📂 Resolving input folder: 'Apricot Report Incoming'...")
+    incoming_res = find_file_id(main_drive_service, "Apricot Report Incoming", impact_folder_id, "application/vnd.google-apps.folder")
+    if incoming_res:
+        input_folder_id = incoming_res['id']
+        log("   ✓ Located 'Apricot Report Incoming' folder ID!")
+    else:
+        log("   ⚠️ 'Apricot Report Incoming' subfolder not found under root. Attempting direct folder resolve...")
+        input_folder_id = resolve_folder_id(main_drive_service, "Apricot Report Incoming")
+
+    # 3. Resolve Processed Folder: 'Quarterly KPI Processed Data'
+    log("📂 Resolving occupancy & processed folder: 'Quarterly KPI Processed Data'...")
+    target_occ_folder_id = input_folder_id
+    try:
+        kpi_res = find_file_id(main_drive_service, "CityTeam KPIs", impact_folder_id, "application/vnd.google-apps.folder")
+        if not kpi_res:
+            kpi_res = find_file_id(main_drive_service, "CityTeam KPIs", None, "application/vnd.google-apps.folder")
+
+        if kpi_res:
+            proc_res = find_file_id(main_drive_service, "Quarterly KPI Processed Data", kpi_res['id'], "application/vnd.google-apps.folder")
+            if proc_res:
+                target_occ_folder_id = proc_res['id']
+                log("   ✓ Located target folder: 'Quarterly KPI Processed Data'!")
+            else:
+                target_occ_folder_id = kpi_res['id']
+                log("   ⚠️ 'Quarterly KPI Processed Data' not found under 'CityTeam KPIs'; using parent.")
+    except Exception as e:
+        log(f"   ⚠️ Exception resolving occupancy folder path: {e}")
+
+    # 4. Locate and load 'Clients in All Programs Average' (Latest Occupancy & Latest Mentorship)
+    log(f"📄 Locating occupancy dataset: '{FILE_OCCUPANCY_NAME}'...")
+    df_occ = pd.DataFrame()
+    df_ment_occ = pd.DataFrame()
+    try:
+        occ_file_res = find_file_id(main_drive_service, FILE_OCCUPANCY_NAME, target_occ_folder_id)
+        if occ_file_res:
+            mime = occ_file_res.get("mimeType", "")
+            if mime == "application/vnd.google-apps.spreadsheet":
+                occ_ss = gc.open_by_key(occ_file_res['id'])
+                
+                # Sheet 1: Latest Occupancy
+                try:
+                    ws_occ = occ_ss.worksheet("Latest Occupancy")
+                    df_occ = clean_df_columns(pd.DataFrame(ws_occ.get_all_records()))
+                    log("   ✓ Loaded 'Latest Occupancy' from native Google Sheet!")
+                except Exception as e:
+                    log(f"   ⚠️ Tab 'Latest Occupancy' missing: {e}")
+
+                # Sheet 2: Latest Mentorship
+                try:
+                    ws_ment_occ = occ_ss.worksheet("Latest Mentorship")
+                    df_ment_occ = clean_df_columns(pd.DataFrame(ws_ment_occ.get_all_records()))
+                    log("   ✓ Loaded 'Latest Mentorship' from native Google Sheet!")
+                except Exception as e:
+                    log(f"   ⚠️ Tab 'Latest Mentorship' missing: {e}")
+            else:
+                fh_occ, _, _ = download_drive_file(main_drive_service, occ_file_res['name'], target_occ_folder_id)
+                xls = pd.ExcelFile(fh_occ)
+                if "Latest Occupancy" in xls.sheet_names:
+                    df_occ = clean_df_columns(pd.read_excel(xls, sheet_name="Latest Occupancy"))
+                if "Latest Mentorship" in xls.sheet_names:
+                    df_ment_occ = clean_df_columns(pd.read_excel(xls, sheet_name="Latest Mentorship"))
+                log("   ✓ Successfully loaded tabs from Excel occupancy workbook!")
+        else:
+            log(f"⚠️ Could not find '{FILE_OCCUPANCY_NAME}' in target folder.")
+    except Exception as e:
+        log(f"⚠️ Warning loading occupancy data: {e}")
+
+    # 5. Parallel download for raw Excel source files from 'Apricot Report Incoming'
+    log("⚡ Downloading raw Excel source files in parallel from 'Apricot Report Incoming'...")
     download_tasks = [
-        ("occ", FILE_OCCUPANCY_NAME, input_folder_id),
         ("renew", FILE_RENEW_NAME, input_folder_id),
         ("tp", FILE_TP_NAME, input_folder_id),
-        ("mrb", FILE_MRB_NAME, input_folder_id),
+        ("bap", FILE_BAPTISMS_NAME, input_folder_id),
+        ("ment", FILE_MENTOR_NAME, input_folder_id),
+        ("reun", FILE_REUNIF_NAME, input_folder_id),
         ("alum", FILE_ALUMNI_NAME, input_folder_id),
         ("atwork", FILE_ATWORK_NAME, input_folder_id)
     ]
@@ -653,72 +1173,43 @@ def run_marketing_processor(input_folder_name="Quarterly KPI Processed Data"):
             downloads[key] = (fh, file_id)
             log(f"   ✓ Downloaded: {key}")
 
-    fh_occ, _ = downloads["occ"]
     fh_renew, _ = downloads["renew"]
     fh_tp, _ = downloads["tp"]
-    fh_mrb, _ = downloads["mrb"]
+    fh_bap, _ = downloads["bap"]
+    fh_ment, _ = downloads["ment"]
+    fh_reun, _ = downloads["reun"]
     fh_alum, _ = downloads["alum"]
     fh_atwork, _ = downloads["atwork"]
 
-    # 3. Load Source DataFrames
-    log("   Parsing Excel data into DataFrames...")
-    df_occ = pd.read_excel(fh_occ, sheet_name="Latest Occupancy")
-
-    xls_renew = pd.ExcelFile(fh_renew)
-    renew_sheets = xls_renew.sheet_names
-    renew_raw_sheet = "Renew Raw Data" if "Renew Raw Data" in renew_sheets else ("Raw Data" if "Raw Data" in renew_sheets else renew_sheets[0])
-    df_renew_raw  = pd.read_excel(xls_renew, sheet_name=renew_raw_sheet)
-    df_renew_occ  = pd.read_excel(xls_renew, sheet_name="Occupancy") if "Occupancy" in renew_sheets else df_renew_raw
-    df_renew_grad = pd.read_excel(xls_renew, sheet_name="Renew Graduates") if "Renew Graduates" in renew_sheets else pd.DataFrame()
-
-    xls_tp = pd.ExcelFile(fh_tp)
-    tp_sheets = xls_tp.sheet_names
-    tp_raw_sheet = "Turning Point Raw Data" if "Turning Point Raw Data" in tp_sheets else ("Raw Data" if "Raw Data" in tp_sheets else tp_sheets[0])
-    df_tp_raw    = pd.read_excel(xls_tp, sheet_name=tp_raw_sheet)
-    df_tp_occ    = pd.read_excel(xls_tp, sheet_name="Occupancy") if "Occupancy" in tp_sheets else df_tp_raw
-    df_tp_grad   = pd.read_excel(xls_tp, sheet_name="Turning Point Graduates") if "Turning Point Graduates" in tp_sheets else pd.DataFrame()
-    df_tp_housed = pd.read_excel(xls_tp, sheet_name="Successfully Housed") if "Successfully Housed" in tp_sheets else pd.DataFrame()
-
-    xls_mrb = pd.ExcelFile(fh_mrb)
-    mrb_sheets = xls_mrb.sheet_names
-    df_ment = pd.read_excel(xls_mrb, sheet_name="Mentorship Processed") if "Mentorship Processed" in mrb_sheets else pd.DataFrame()
-    df_reun = pd.read_excel(xls_mrb, sheet_name="Reunifications Processed") if "Reunifications Processed" in mrb_sheets else pd.DataFrame()
-    df_bap  = pd.read_excel(xls_mrb, sheet_name="Baptisms Processed") if "Baptisms Processed" in mrb_sheets else pd.DataFrame()
-
-    xls_alum = pd.ExcelFile(fh_alum)
-    alum_sheets = xls_alum.sheet_names
-    df_sobriety = pd.read_excel(xls_alum, sheet_name="Sobriety") if "Sobriety" in alum_sheets else pd.DataFrame()
-    df_housing  = pd.read_excel(xls_alum, sheet_name="Housing") if "Housing" in alum_sheets else pd.DataFrame()
-    df_lw       = pd.read_excel(xls_alum, sheet_name="Living Wage") if "Living Wage" in alum_sheets else pd.DataFrame()
-
-    xls_atwork = pd.ExcelFile(fh_atwork)
-    atwork_sheets = xls_atwork.sheet_names
-    df_atwork  = pd.read_excel(xls_atwork, sheet_name="@Work Processed") if "@Work Processed" in atwork_sheets else (pd.read_excel(xls_atwork, sheet_name="@Work Raw Data") if "@Work Raw Data" in atwork_sheets else pd.DataFrame())
+    log("   Parsing raw Excel data into DataFrames...")
+    df_renew_raw  = clean_df_columns(pd.read_excel(fh_renew, header=3).iloc[:, 1:])
+    df_tp_raw     = clean_df_columns(pd.read_excel(fh_tp, header=3).iloc[:, 1:])
+    df_bap_raw    = clean_df_columns(pd.read_excel(fh_bap, header=3).iloc[:, 1:])
+    df_ment_raw   = clean_df_columns(pd.read_excel(fh_ment, header=3).iloc[:, 1:])
+    df_reun_raw   = clean_df_columns(pd.read_excel(fh_reun, header=3).iloc[:, 1:])
+    df_alumni_raw = clean_df_columns(pd.read_excel(fh_alum, header=3).iloc[:, 1:])
+    df_atwork_raw = clean_df_columns(pd.read_excel(fh_atwork, header=3).iloc[:, 1:])
 
     dfs = {
         "occ": df_occ,
+        "ment_occ": df_ment_occ,
         "renew_raw": df_renew_raw,
-        "renew_occ": df_renew_occ,
-        "renew_grad": df_renew_grad,
         "tp_raw": df_tp_raw,
-        "tp_occ": df_tp_occ,
-        "tp_grad": df_tp_grad,
-        "tp_housed": df_tp_housed,
-        "ment": df_ment,
-        "reun": df_reun,
-        "bap": df_bap,
-        "sobriety": df_sobriety,
-        "housing": df_housing,
-        "lw": df_lw,
-        "atwork": df_atwork
+        "bap_raw": df_bap_raw,
+        "ment_raw": df_ment_raw,
+        "reun_raw": df_reun_raw,
+        "alumni_raw": df_alumni_raw,
+        "atwork_raw": df_atwork_raw
     }
 
-    # 4. Iterate over Fiscal Year configurations (FY26 & FY27)
+    # Execute KPI updates for FY26 and FY27
     for fy_key, fy_info in FY_CONFIGS.items():
         process_fiscal_year(fy_key, fy_info, gc, dfs)
 
-    log("\n🎉 Marketing Processor Execution Complete for FY26 and FY27!")
+    # Automatically generate and upload the Marketing Data Impact Spreadsheet
+    generate_and_upload_audit_spreadsheet(main_drive_service, target_occ_folder_id)
 
+    log("\n🎉 Marketing Processor & Audit Workbook Execution Complete!")
 
 if __name__ == "__main__":
     run_marketing_processor()
