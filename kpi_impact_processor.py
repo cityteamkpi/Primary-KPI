@@ -231,8 +231,21 @@ def run_kpi_impact_processing(
             if k in df.columns:
                 df[k] = df[k].fillna(0).astype(int)
 
+        # Detect Name column dynamically (e.g., Name_2057, Full Name, Name)
+        name_col = next(
+            (
+                c for c in df.columns
+                if str(c).strip().lower() in {"name_2057", "full name", "name"}
+                or str(c).strip().lower().startswith("name_")
+            ),
+            None,
+        )
+
         # Explicit column selection
-        BASE_COLS = [COL_RECORD_ID, COL_PROGRAM, "City", "Year", "Quarter", "Year Q"]
+        BASE_COLS = [COL_RECORD_ID]
+        if name_col:
+            BASE_COLS.append(name_col)
+        BASE_COLS.extend([COL_PROGRAM, "City", "Year", "Quarter", "Year Q"])
         if label == "Mentorship":
             BASE_COLS.append(COL_MENTOR_CHURCH)
 

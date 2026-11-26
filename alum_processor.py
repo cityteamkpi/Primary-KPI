@@ -8,10 +8,12 @@ import numpy as np
 import gspread
 from auth_utils import get_services
 from drive_utils import (
-    resolve_folder_id, 
-    download_drive_file, 
-    load_raw, 
-    find_file_id
+    resolve_folder_id,
+    resolve_folder_path,
+    download_drive_file,
+    load_raw,
+    find_file_id,
+    parse_numeric_cell,
 )
 import constants
 
@@ -32,6 +34,7 @@ COL_NAME = "Name_2057"
 COL_PROGRAM = "Program Enrolling_2091"
 COL_INTERN_PROGRAM = "Intern Program_6619"
 COL_POST_GRAD = "Post Graduate Program Association_6619"
+COL_INTERN_RESOLVED = "_INTERN_RESOLVED"
 COL_START_DATE = "Start Date_2090"
 COL_EXIT_DATE = "Exit Date_2100"
 COL_EXIT_REASON = "Primary Reason for Exit_2102"
@@ -53,32 +56,85 @@ INTERN_AND_FORWARD_PROGRAM_NAMES = {
     "forward",
 }
 
+# Mapping of Renew Program -> (City KPI Goal Filename, Worksheet Tab Name)
+RENEW_GOAL_FILES = {
+    "Chester Renew":      ("Chester FY27 KPI Goals",        "Men Renew"),
+    "Oakland Renew":      ("Oakland FY27 KPI Goals",        "Men Renew"),
+    "Portland Renew":     ("Portland FY27 KPI Goals",       "Men Renew"),
+    "San Jose Men Renew": ("San Jose Men FY27 KPI Goals",   "Men Renew"),
+    "GV Renew":           ("San Jose Women FY27 KPI Goals", "GV Renew"),
+}
+
+
+def load_fy27_lw_criteria(drive_service, gc):
+    """
+    Reads cell B5 (Living Wage criteria) from each Renew program's tab in:
+      CityTeam Impact Data -> CityTeam KPIs -> FY27 -> Program Goals
+    """
+    goals_folder_id = resolve_folder_path(
+        drive_service,
+        ["CityTeam Impact Data", "CityTeam KPIs", "FY27", "Program Goals"]
+    )
+    lw_map = {}
+
+    for program, (file_name, tab_name) in RENEW_GOAL_FILES.items():
+        file_info = find_file_id(drive_service, file_name, goals_folder_id)
+        if not file_info:
+            raise FileNotFoundError(f"Could not find goal file '{file_name}' in Program Goals folder.")
+
+        ss = gc.open_by_key(file_info["id"])
+        try:
+            ws = ss.worksheet(tab_name)
+        except gspread.WorksheetNotFound:
+            ws = ss.get_worksheet(0)
+
+        raw_val = ws.acell("B5").value
+        parsed = parse_numeric_cell(raw_val, default=0.0)
+        lw_map[program] = float(parsed) if pd.notna(parsed) else 0.0
+
+    return lw_map
+
+
 def get_intern_program_value(row):
     """
-    Prioritization Rule:
-    - If either Post Graduate or Intern Program is null, prioritize non-null.
-    - If they contradict (both populated and different), prioritize Post Graduate.
+    Unifies Post Graduate Program Association_6619 and Intern Program_6619
+    since they represent the same field across schema versions.
+    - If either is null, prioritize non-null.
+    - If both are populated and differ, prioritize Post Graduate Program Association_6619.
     """
     post_grad = row.get(COL_POST_GRAD)
     intern_prog = row.get(COL_INTERN_PROGRAM)
 
-    post_str = str(post_grad).strip() if pd.notna(post_grad) and str(post_grad).strip().lower() != "nan" else None
-    intern_str = str(intern_prog).strip() if pd.notna(intern_prog) and str(intern_prog).strip().lower() != "nan" else None
+    post_str = str(post_grad).strip() if pd.notna(post_grad) and str(post_grad).strip().lower() not in ("", "nan", "none") else None
+    intern_str = str(intern_prog).strip() if pd.notna(intern_prog) and str(intern_prog).strip().lower() not in ("", "nan", "none") else None
 
     if post_str:
         return post_str
     return intern_str
 
+
+def is_intern_or_forward_value(val):
+    if pd.isna(val):
+        return False
+    return str(val).strip().lower() in INTERN_AND_FORWARD_PROGRAM_NAMES
+
+
 def clean_wage(val):
-    if pd.isna(val): return 0.0
-    if isinstance(val, (int, float)): return float(val)
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
     clean = str(val).replace("$", "").replace(",", "").strip()
-    try: return float(clean)
-    except: return 0.0
+    try:
+        return float(clean)
+    except Exception:
+        return 0.0
+
 
 def max_nonzero(series):
     vals = series.replace(0, np.nan).dropna()
     return vals.max() if not vals.empty else 0.0
+
 
 def get_grad_wage(group):
     """Prioritizes graduation checkin rows where How Checked is 'Graduation' strictly.
@@ -89,9 +145,9 @@ def get_grad_wage(group):
         grad_checked = group[group[COL_HOW_CHECKED] == "Graduation"]
         if not grad_checked.empty:
             return float(grad_checked[COL_WAGE].iloc[0])
-    
-    # Fallback if no explicit 'Graduation' check-in row exists
+
     return max_nonzero(group[COL_WAGE])
+
 
 def write_tab(spreadsheet, tab_name, df):
     """Writes DataFrame to Google Sheets replacing all non-compliant JSON values
@@ -134,9 +190,10 @@ def write_tab(spreadsheet, tab_name, df):
     values = [headers] + clean_rows
     worksheet.update(values)
 
-def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
-    lw_target = constants.LW_CRITERIA.get(program, 0.0) or 0.0
-    
+
+def analyze_client(name, program, grad_date, df_raw_parsed, df_merged, lw_criteria_map):
+    lw_target = lw_criteria_map.get(program, 0.0) or 0.0
+
     person_records = df_raw_parsed[
         (df_raw_parsed[COL_NAME] == name) &
         (df_raw_parsed[COL_PROGRAM] == program)
@@ -149,37 +206,45 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
             (person_records[COL_CHECKIN] < person_records[COL_START_DATE])
         ]
 
-    # --- Sobriety Logic ---
+    grad_event_rows = person_records[person_records[COL_EXIT_DATE] == grad_date]
+    has_intern_assoc = (
+        is_intern_or_forward_value(program) or
+        (
+            not grad_event_rows.empty and
+            COL_INTERN_RESOLVED in grad_event_rows.columns and
+            grad_event_rows[COL_INTERN_RESOLVED].apply(is_intern_or_forward_value).any()
+        )
+    )
+
     sober_records = person_records[
         person_records[COL_SOBER].isin(["Yes", "No"]) &
         (person_records[COL_CHECKIN] > grad_date)
     ] if COL_SOBER in person_records.columns else pd.DataFrame()
-    
+
     has_sustained_relapse = False
     first_no_date = None
     last_checkin_sober = False
-    
+
     for _, s_row in sober_records.iterrows():
         cur_state = s_row[COL_SOBER]
         cur_date = s_row[COL_CHECKIN]
-        
+
         if cur_state == "No":
-            if first_no_date is None: 
+            if first_no_date is None:
                 first_no_date = cur_date
         elif cur_state == "Yes":
             if first_no_date is not None:
-                if (cur_date - first_no_date).days > 30: 
+                if (cur_date - first_no_date).days > 30:
                     has_sustained_relapse = True
                 first_no_date = None
-                
+
         last_checkin_sober = (cur_state == "Yes")
-    
+
     if sober_records.empty:
         is_sober = True
     else:
         is_sober = last_checkin_sober and not has_sustained_relapse
 
-    # --- Wage & Housing Logic ---
     merged_row = df_merged[
         (df_merged[COL_NAME] == name) &
         (df_merged[COL_PROGRAM] == program) &
@@ -196,7 +261,6 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
 
     wage_recent_out = recent_wage if is_sober else None
 
-    # Housing Expense & Income calculations
     grad_housing = float(merged_row[COL_HOUSING].iloc[0]) if not merged_row.empty and COL_HOUSING in merged_row.columns and pd.notna(merged_row[COL_HOUSING].iloc[0]) else 0.0
     grad_income = grad_wage * MONTHLY_HOURS
 
@@ -205,25 +269,23 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
     recent_housing = grad_housing
     recent_income = 0.0
 
-    # Helper function for housing affordability calculation (<= 30%)
     def is_under_30(housing, income):
         if housing == 0:
             return 1
         if income > 0:
             return 1 if (housing / income) <= 0.30 else 0
-        return 0  # Income is 0 but Housing > 0
+        return 0
 
     if not merged_row.empty:
         grad_under_30 = is_under_30(grad_housing, grad_income)
 
         _recent_housing_val = merged_row["recent_housing"].iloc[0] if "recent_housing" in merged_row.columns else None
         recent_housing = float(_recent_housing_val) if _recent_housing_val is not None and pd.notna(_recent_housing_val) else grad_housing
-        
+
         effective_recent_wage = wage_recent_out if wage_recent_out is not None else 0.0
         recent_income = effective_recent_wage * MONTHLY_HOURS
         recent_under_30 = is_under_30(recent_housing, recent_income)
-    
-    # --- Living Wage Evaluators ---
+
     pays_lw_grad = int(grad_wage >= lw_target) if lw_target else 0
 
     if is_sober:
@@ -241,6 +303,7 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
         "Quarter": constants.get_fiscal_quarter(grad_date),
         "Year Q": f"{constants.get_fiscal_year(grad_date) or ''} {constants.get_fiscal_quarter(grad_date) or ''}".strip(),
         "is_sober": is_sober,
+        "_has_intern_assoc": has_intern_assoc,
         "Sustained Relapse?": "Yes" if has_sustained_relapse else "No",
         "Wage (Grad)": grad_wage,
         "LW Criteria": lw_target,
@@ -255,17 +318,18 @@ def analyze_client(name, program, grad_date, df_raw_parsed, df_merged):
         "Housing Under 30% (Recent)": 0 if recent_under_30 is None else int(recent_under_30),
     }
 
+
 def process_aftercare_tab(df_raw_parsed):
     """Processes Aftercare tab for ALL clients who EVER graduated from a Renew program (no date limits),
     evaluating ONLY their absolute most recent check-in date. Always maps their program column back
-    to their original Renew graduation program.
+    to their original Renew graduation program, and unifies Post Graduate Program Association_6619
+    with Intern Program_6619.
     """
     df = df_raw_parsed.copy()
     today_ts = pd.Timestamp.now().normalize()
-    
+
     renew_programs_set = {str(p).strip().lower() for p in constants.RENEW_PROGRAMS}
 
-    # Find ALL Renew graduation events across the entire dataset (no date filter)
     df_grads_renew = df[
         df[COL_PROGRAM].astype(str).str.strip().str.lower().isin(renew_programs_set) &
         df[COL_EXIT_REASON].isin(GRAD_REASONS) &
@@ -275,7 +339,6 @@ def process_aftercare_tab(df_raw_parsed):
     if df_grads_renew.empty:
         return pd.DataFrame()
 
-    # Create lookup map: Record ID -> Original Renew Graduation Program name
     orig_renew_map = (
         df_grads_renew.sort_values(by=COL_EXIT_DATE)
         .groupby(COL_RECORD_ID)[COL_PROGRAM]
@@ -283,14 +346,11 @@ def process_aftercare_tab(df_raw_parsed):
         .to_dict()
     )
 
-    # Pull all records across the dataset for these specific Renew graduates
     grad_record_ids = set(orig_renew_map.keys())
     df_client_records = df[df[COL_RECORD_ID].isin(grad_record_ids)].copy()
 
-    # Parse checkin dates
     df_client_records["_checkin_dt"] = pd.to_datetime(df_client_records[COL_CHECKIN], errors="coerce")
 
-    # Isolate strictly the single absolute latest check-in per client (Record ID)
     df_latest = (
         df_client_records[df_client_records["_checkin_dt"].notna()]
         .sort_values(by=["_checkin_dt", COL_EXIT_DATE], ascending=[False, False])
@@ -301,37 +361,34 @@ def process_aftercare_tab(df_raw_parsed):
     if df_latest.empty:
         return pd.DataFrame()
 
-    # Always override Program Enrolling with their original Renew Graduation Program
     df_latest[COL_PROGRAM] = df_latest[COL_RECORD_ID].map(orig_renew_map).fillna(df_latest[COL_PROGRAM])
-
-    # Calculate days elapsed since the latest check-in
+    df_latest["Post Graduate Program Association"] = df_latest[COL_INTERN_RESOLVED].fillna("")
     df_latest["_days_ago"] = (today_ts - df_latest["_checkin_dt"]).dt.days
 
-    # Assign single mutually exclusive window flag based strictly on the latest check-in
     df_latest["Aftercare30"]     = (df_latest["_days_ago"] <= 30).astype(int)
     df_latest["Aftercare60"]     = ((df_latest["_days_ago"] >= 31) & (df_latest["_days_ago"] <= 60)).astype(int)
     df_latest["Aftercare90"]     = ((df_latest["_days_ago"] >= 61) & (df_latest["_days_ago"] <= 90)).astype(int)
     df_latest["Aftercare91Plus"] = (df_latest["_days_ago"] >= 91).astype(int)
 
-    # Assign FY and FY Q based on Exit Date
     df_latest["FY"]   = df_latest[COL_EXIT_DATE].apply(constants.get_fiscal_year)
     df_latest["FY Q"] = df_latest[COL_EXIT_DATE].apply(
         lambda d: f"{constants.get_fiscal_year(d) or ''} {constants.get_fiscal_quarter(d) or ''}".strip() if pd.notna(d) else ""
     )
 
-    # Format date columns to string (YYYY-MM-DD)
     df_latest[COL_START_DATE] = pd.to_datetime(df_latest[COL_START_DATE], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
     df_latest[COL_EXIT_DATE]  = pd.to_datetime(df_latest[COL_EXIT_DATE],  errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
     df_latest[COL_CHECKIN]    = pd.to_datetime(df_latest[COL_CHECKIN],    errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
 
     target_cols = [
-        COL_RECORD_ID, COL_NAME, COL_CHECKIN, COL_PROGRAM, COL_INTERN_PROGRAM,
+        COL_RECORD_ID, COL_NAME, COL_CHECKIN, COL_PROGRAM,
+        "Post Graduate Program Association",
         COL_START_DATE, COL_EXIT_DATE, "FY", "FY Q",
         "Aftercare30", "Aftercare60", "Aftercare90", "Aftercare91Plus"
     ]
 
     cols_to_use = [c for c in target_cols if c in df_latest.columns]
     return df_latest[cols_to_use].reset_index(drop=True)
+
 
 def run_alum_processing(
     input_file=SRC_ALUMNI + ".xlsx",
@@ -343,28 +400,32 @@ def run_alum_processing(
     drive_service, gc, _ = get_services()
     constants.sync_constants()
 
-    # ── Fiscal Year Target Filtering ──────────────────────────────────────────
+    lw_criteria_map = load_fy27_lw_criteria(drive_service, gc)
+    print(f"✅ Loaded FY27 Living Wage Criteria (B5): {lw_criteria_map}")
+
     target_fy_num = constants.fy_num - 1
     target_fy_str = f"FY{str(target_fy_num)[-2:]}"
 
-    print(f"   KPI Target Fiscal Year: {target_fy_str} (Q1 - Q4)")
+    q_num = getattr(constants, "q_num", None)
+    if q_num is None:
+        m = datetime.date.today().month
+        q_num = 1 if m in (9, 10, 11) else (2 if m in (12, 1, 2) else (3 if m in (3, 4, 5) else 4))
+    target_quarter_str = f"Q{q_num}"
 
-    # 1. Download and Load Data
+    print(f"   Sobriety Cohort: {target_fy_str} (Q1 - Q4)")
+    print(f"   Living Wage & Housing Cohort: {target_fy_str} {target_quarter_str} ONLY (1 year ago)")
+
     input_folder_id = resolve_folder_id(drive_service, input_folder_name, "Input")
     output_folder_id = resolve_folder_id(drive_service, output_folder_name, "Output")
 
     fh_alumni, _, _ = download_drive_file(drive_service, input_file, input_folder_id)
 
-    # --- RAW DATA & PARSED DATA ALIGNMENT ---
     fh_alumni.seek(0)
     df_raw_complete = load_raw(fh_alumni, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
-
     df_raw = df_raw_complete.copy()
 
-    # Calculate prioritized intern program value
-    df_raw["_INTERN_RESOLVED"] = df_raw.apply(get_intern_program_value, axis=1)
+    df_raw[COL_INTERN_RESOLVED] = df_raw.apply(get_intern_program_value, axis=1)
 
-    # 2. Parsing & Dropping Invalid Client Names
     df_raw_parsed = df_raw.dropna(subset=[COL_NAME]).copy()
     if COL_RECORD_ID not in df_raw_parsed.columns:
         df_raw_parsed[COL_RECORD_ID] = np.nan
@@ -379,7 +440,6 @@ def run_alum_processing(
     if COL_SOBER in df_raw_parsed.columns:
         df_raw_parsed[COL_SOBER] = df_raw_parsed[COL_SOBER].astype(str).str.strip()
 
-    # Map each client's absolute latest enrolled program across the entire raw dataset
     df_raw_sorted = df_raw_parsed.sort_values(by=[COL_EXIT_DATE, COL_CHECKIN])
     latest_program_map = (
         df_raw_sorted.dropna(subset=[COL_PROGRAM])
@@ -389,16 +449,14 @@ def run_alum_processing(
         .to_dict()
     )
 
-    # 3. Pull graduation records EXCLUSIVELY for Renew Graduates
     renew_programs_set = {str(p).strip().lower() for p in constants.RENEW_PROGRAMS}
-    
+
     df_grads_all = df_raw_parsed[
         df_raw_parsed[COL_PROGRAM].astype(str).str.strip().str.lower().isin(renew_programs_set) &
         df_raw_parsed[COL_EXIT_REASON].isin(GRAD_REASONS) &
         df_raw_parsed[COL_EXIT_DATE].notna()
     ].copy()
 
-    # Deduplicate: Preserve distinct graduation events per Client, Program, and Exit Date
     df_grads = (
         df_grads_all
         .sort_values(by=[COL_EXIT_DATE, COL_EXIT_REASON])
@@ -406,7 +464,6 @@ def run_alum_processing(
         .reset_index(drop=True)
     )
 
-    # Calculate prioritized wage & housing for graduation records
     _grad_rows = df_raw_parsed[
         df_raw_parsed[COL_EXIT_REASON].isin(GRAD_REASONS) &
         df_raw_parsed[COL_EXIT_DATE].notna()
@@ -425,7 +482,6 @@ def run_alum_processing(
         .reset_index()
     )
 
-    # Post-grad checkin processing
     _all = df_raw_parsed.copy()
     _grad_dates = df_grads[[COL_NAME, COL_PROGRAM, COL_EXIT_DATE]].rename(columns={COL_EXIT_DATE: "grad_date"})
     _grad_dates["grad_date"] = pd.to_datetime(_grad_dates["grad_date"]).dt.normalize()
@@ -437,19 +493,18 @@ def run_alum_processing(
 
     if COL_START_DATE in _post.columns:
         _post = _post[
-            (_post[COL_START_DATE].isna()) | 
-            (_post[COL_START_DATE] <= _post["grad_date"]) | 
+            (_post[COL_START_DATE].isna()) |
+            (_post[COL_START_DATE] <= _post["grad_date"]) |
             (_post[COL_CHECKIN] < _post[COL_START_DATE])
         ].copy()
 
     if not _post.empty:
         _latest = _post.groupby([COL_NAME, COL_PROGRAM, "grad_date"])[COL_CHECKIN].transform("max")
         _post_latest = _post[_post[COL_CHECKIN] == _latest].copy()
-        
-        # Grab wage and housing strictly from the latest checkin date row(s)
+
         df_recent = _post_latest.groupby([COL_NAME, COL_PROGRAM, "grad_date"], sort=False).agg(
             recent_wage=(COL_WAGE, max_nonzero),
-            recent_housing=(COL_HOUSING, "max"),  # Max as tie-breaker if multiple rows on latest date
+            recent_housing=(COL_HOUSING, "max"),
             recent_checkin=(COL_CHECKIN, "max")
         ).reset_index().rename(columns={"grad_date": COL_EXIT_DATE})
     else:
@@ -458,11 +513,10 @@ def run_alum_processing(
 
     df_merged = df_merged.merge(df_recent, on=[COL_NAME, COL_PROGRAM, COL_EXIT_DATE], how="left")
 
-    # 4. Analyze Renew Graduates
     all_results = []
     for _, row in df_grads.iterrows():
-        all_results.append(analyze_client(row[COL_NAME], row[COL_PROGRAM], row[COL_EXIT_DATE], df_raw_parsed, df_merged))
-    
+        all_results.append(analyze_client(row[COL_NAME], row[COL_PROGRAM], row[COL_EXIT_DATE], df_raw_parsed, df_merged, lw_criteria_map))
+
     results_df = pd.DataFrame(all_results) if all_results else pd.DataFrame()
 
     if not results_df.empty:
@@ -470,15 +524,20 @@ def run_alum_processing(
     else:
         results_df["Latest Program"] = None
 
-    fy_filtered_df = results_df[results_df["Year"] == target_fy_str].copy() if not results_df.empty else pd.DataFrame()
+    sobriety_cohort_df = (
+        results_df[results_df["Year"] == target_fy_str].copy()
+        if not results_df.empty else pd.DataFrame()
+    )
 
-    # Helper function to check if a program is any form of intern program
-    def is_intern_program(prog_val):
-        if pd.isna(prog_val): return False
-        return str(prog_val).strip().lower() in INTERN_AND_FORWARD_PROGRAM_NAMES
+    lw_housing_cohort_df = (
+        results_df[
+            (results_df["Year"] == target_fy_str) &
+            (results_df["Quarter"] == target_quarter_str)
+        ].copy()
+        if not results_df.empty else pd.DataFrame()
+    )
 
-    # --- Sobriety Tab ---
-    df_sobriety = fy_filtered_df.copy()
+    df_sobriety = sobriety_cohort_df.copy()
     if not df_sobriety.empty:
         df_sobriety["Sobriety 1 Year"] = df_sobriety["is_sober"].astype(int)
         df_sobriety = df_sobriety[[
@@ -491,8 +550,7 @@ def run_alum_processing(
             "City", "Year", "Quarter", "Year Q", "Sustained Relapse?", "Sobriety 1 Year"
         ])
 
-    # --- Living Wage Tab ---
-    df_base_lw = fy_filtered_df.copy() if not fy_filtered_df.empty else pd.DataFrame()
+    df_base_lw = lw_housing_cohort_df.copy()
     if not df_base_lw.empty:
         df_lw = df_base_lw[[
             COL_NAME, COL_PROGRAM, "Graduation Date", "Most Recent Checkin", "City",
@@ -506,11 +564,10 @@ def run_alum_processing(
             "Wage (Recent)", "Pays LW? (Recent)"
         ])
 
-    # --- Housing Tab ---
-    if not fy_filtered_df.empty:
-        df_base_housing = fy_filtered_df[
-            (fy_filtered_df["is_sober"] == True) &
-            (~fy_filtered_df[COL_PROGRAM].apply(is_intern_program))
+    if not lw_housing_cohort_df.empty:
+        df_base_housing = lw_housing_cohort_df[
+            (lw_housing_cohort_df["is_sober"] == True) &
+            (~lw_housing_cohort_df["_has_intern_assoc"])
         ].copy()
     else:
         df_base_housing = pd.DataFrame()
@@ -518,7 +575,7 @@ def run_alum_processing(
     if not df_base_housing.empty:
         df_housing = df_base_housing[[
             COL_NAME, COL_PROGRAM, "Graduation Date", "Most Recent Checkin", "City",
-            "Year", "Quarter", "Year Q", "Wage (Grad)", "Wage (Recent)", 
+            "Year", "Quarter", "Year Q", "Wage (Grad)", "Wage (Recent)",
             "Monthly Income (Grad)", "Monthly Income (Recent)",
             "Housing Expense (Grad)", "Housing Expense (Recent)",
             "Housing Under 30% (Grad)", "Housing Under 30% (Recent)"
@@ -526,20 +583,17 @@ def run_alum_processing(
     else:
         df_housing = pd.DataFrame(columns=[
             COL_NAME, COL_PROGRAM, "Graduation Date", "Most Recent Checkin", "City",
-            "Year", "Quarter", "Year Q", "Wage (Grad)", "Wage (Recent)", 
+            "Year", "Quarter", "Year Q", "Wage (Grad)", "Wage (Recent)",
             "Monthly Income (Grad)", "Monthly Income (Recent)",
             "Housing Expense (Grad)", "Housing Expense (Recent)",
             "Housing Under 30% (Grad)", "Housing Under 30% (Recent)"
         ])
 
-    # --- Detailed Analysis ---
-    detailed_df = results_df.sort_values(by=[COL_PROGRAM, COL_NAME]).copy() if not results_df.empty else results_df
+    detailed_df = results_df.drop(columns=["_has_intern_assoc"], errors="ignore").sort_values(by=[COL_PROGRAM, COL_NAME]).copy() if not results_df.empty else results_df
 
-    # --- Aftercare Tab ---
     print("Processing Aftercare Tab (All-Time Ever-Renew Graduates Mapped to Original Renew Program)...")
     df_aftercare = process_aftercare_tab(df_raw_parsed)
 
-    # 5. Write Output
     output_file_res = find_file_id(drive_service, output_file, output_folder_id, "application/vnd.google-apps.spreadsheet")
 
     if output_file_res:
@@ -551,7 +605,6 @@ def run_alum_processing(
 
     print(f"Writing tabs to {ss.url}...")
 
-    # Write DataFrames to Sheets
     write_tab(ss, "Raw Data", df_raw_complete)
     write_tab(ss, "Sobriety", df_sobriety)
     write_tab(ss, "Living Wage", df_lw)
@@ -572,6 +625,7 @@ def run_alum_processing(
 
     print("✅ Done!")
     return f"Alumni Processing Complete. Output: {ss.url}"
+
 
 if __name__ == "__main__":
     run_alum_processing(

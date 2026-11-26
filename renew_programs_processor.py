@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """
 Renew Programs Processing Pipeline
-Processes Graduates, Occupancy, Retention, and ECM Clients tabs for Q4 FY26.
+Processes Graduates, Occupancy, Retention, and ECM Clients tabs.
 Includes Weekly (FY26+), Monthly, and Quarterly Average tabs for Graduates.
-Retention cohort covers clients starting between 5/1/2026 (1 month prior) and 8/31/2026.
-Includes prior quarter (Q3) retention tracking metrics.
+Dynamically pulls FY27 quarterly goals/capacity by city and annual graduate projections from Shared Drives.
 """
 
+import re
 import warnings
 import pandas as pd
 import numpy as np
 import gspread
 from auth_utils import get_services
-from drive_utils import resolve_folder_id, download_drive_file, find_file_id, load_raw, write_tab
+from drive_utils import (
+    resolve_folder_id,
+    resolve_folder_path,
+    download_drive_file,
+    find_file_id,
+    load_raw,
+    write_tab,
+    parse_numeric_cell,
+    load_program_goal_metrics,
+)
 import constants
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
@@ -24,15 +33,92 @@ INTERN_PROGRAM_NAMES = {
     "cdac trainee",
 }
 
-# Category Mapping for Renew Programs
+# Category Mapping for Canonical Renew Programs
 RENEW_PROGRAM_CATEGORY = {
     "Chester Renew": "Renew",
     "GV Renew": "Renew",
     "Oakland Renew": "Renew",
     "Portland Renew": "Renew",
     "San Jose Men Renew": "Renew",
-    "San Jose Women Renew": "Renew",
 }
+
+RENEW_PROGRAMS = list(RENEW_PROGRAM_CATEGORY.keys())
+
+# 6-month programs get +100% (2.0x Capacity); remaining Renew programs are 1-year (+33% -> 1.33x Capacity)
+RENEW_SIX_MONTH_PROGRAMS = {
+    "Portland Renew",
+    "GV Renew",
+}
+
+# Mapping of Program Enrolling -> (City KPI Goal Filename, Worksheet Tab Name)
+PROGRAM_GOAL_FILES = {
+    "Chester Renew":      ("Chester FY27 KPI Goals",      "Men Renew"),
+    "Oakland Renew":      ("Oakland FY27 KPI Goals",      "Men Renew"),
+    "Portland Renew":     ("Portland FY27 KPI Goals",     "Men Renew"),
+    "San Jose Men Renew": ("San Jose Men FY27 KPI Goals", "Men Renew"),
+    "GV Renew":           ("San Jose Women FY27 KPI Goals", "GV Renew"),
+}
+
+
+def is_graduation_reason(val):
+    """Existing keyword rule for identifying graduation exit reasons."""
+    if pd.isna(val) or str(val).strip() == "":
+        return False
+    v = str(val).lower().strip()
+    return any(x in v for x in ["graduation", "completer", "completion", "internship ended"])
+
+
+def load_fy27_kpi_goals(drive_service, gc, active_quarter):
+    """
+    Reads each city's FY27 KPI Goals sheet using shared drive_utils helpers:
+      - Capacity: active quarter point value
+      - Occupancy: active quarter point value
+      - Graduates: cumulative sum from Q1 through active_quarter
+    """
+    metrics = load_program_goal_metrics(
+        drive_service=drive_service,
+        gc=gc,
+        program_goal_files=PROGRAM_GOAL_FILES,
+        active_quarter=active_quarter,
+        fy_prefix="FY27",
+        metric_specs={
+            "capacity":  {"patterns": r"^capacity$",  "mode": "point",      "default": np.nan},
+            "occupancy": {"patterns": r"^occupancy$", "mode": "point",      "default": np.nan},
+            "graduates": {"patterns": r"^graduates",  "mode": "cumulative", "default": 0},
+        },
+    )
+    return metrics["capacity"], metrics["occupancy"], metrics["graduates"]
+
+
+def load_graduate_projections(drive_service, gc):
+    """
+    Reads annual graduate projections from:
+      CityTeam Impact Data -> Apricot Report Incoming -> Fiscal Year Renew Graduate Projections
+    """
+    proj_folder_id = resolve_folder_path(
+        drive_service,
+        ["CityTeam Impact Data", "Apricot Report Incoming"]
+    )
+    proj_file_name = "Fiscal Year Renew Graduate Projections"
+    file_info = find_file_id(drive_service, proj_file_name, proj_folder_id)
+    if not file_info:
+        raise FileNotFoundError(f"Could not find '{proj_file_name}' in Apricot Report Incoming folder.")
+
+    ss = gc.open_by_key(file_info["id"])
+    try:
+        ws = ss.worksheet("Sheet1")
+    except gspread.WorksheetNotFound:
+        ws = ss.get_worksheet(0)
+
+    rows = ws.get_all_values()
+    projections_map = {}
+    for row in rows[1:]:
+        if len(row) >= 2 and str(row[0]).strip():
+            prog_name = str(row[0]).strip()
+            projections_map[prog_name] = parse_numeric_cell(row[1], default=np.nan)
+
+    return projections_map
+
 
 def get_intern_program_value(row):
     """
@@ -50,6 +136,7 @@ def get_intern_program_value(row):
         return post_str
     return intern_str
 
+
 def run_renew_processing(
     input_file="Renew Programs Report.xlsx",
     module_file="Renew Module Progress.xlsx",
@@ -57,9 +144,6 @@ def run_renew_processing(
     input_folder_name=None,
     output_folder_name=None
 ):
-    # =========================================================================
-    # Header & Column Constants
-    # =========================================================================
     RAW_DATA_HEADER_ROW = 3
     RAW_DATA_START_COL  = 1
 
@@ -77,7 +161,6 @@ def run_renew_processing(
     COL_ENGAGEMENT     = "Status of Member Engagement_6386"
     COL_SM_START_DATE  = "Start Date for Mentoring_4365"
 
-    # Module Mapping across City Locations
     CITY_MODULE_MAP = {
         "Oakland": [
             (1, "Module 1 Begin Date_3365"),
@@ -111,50 +194,27 @@ def run_renew_processing(
         ]
     }
 
-    # Extract all module date columns across all cities for clean handling
     ALL_MODULE_DATE_COLS = list({col for mods in CITY_MODULE_MAP.values() for _, col in mods})
 
-    GRAD_REASONS   = constants.GRAD_REASONS
-    RENEW_PROGRAMS = list(constants.RENEW_PROGRAMS)
-
-    # Static Hardcoded Values Mapped by Program Enrolling
-    FY27_CAPACITY_MAP = {
-        "Chester Renew": 26,
-        "GV Renew": 38,
-        "Oakland Renew": 48,
-        "Portland Renew": 40,
-        "San Jose Men Renew": 65,
-    }
-
-    FY27_OCC_GOAL_MAP = {
-        "Chester Renew": 23,
-        "GV Renew": 34,
-        "Oakland Renew": 43,
-        "Portland Renew": 36,
-        "San Jose Men Renew": 58,
-    }
-
-    # =========================================================================
-    # 1. Initialize Services & Sync Constants
-    # =========================================================================
     drive_service, gc, _ = get_services()
     constants.sync_constants()
 
-    # Explicitly enforce pd.Timestamp typing for quarter boundaries
-    q_start_ts   = pd.Timestamp(constants.CURRENT_Q_START)      # 2026-06-01
-    q_end_ts     = pd.Timestamp(constants.CURRENT_Q_END)        # 2026-08-31
-    cohort_start = q_start_ts - pd.DateOffset(months=1)         # 2026-05-01 (1 month prior)
-    far_future   = pd.Timestamp("2099-12-31")
+    q_start_ts     = pd.Timestamp(constants.CURRENT_Q_START)
+    q_end_ts       = pd.Timestamp(constants.CURRENT_Q_END)
+    active_quarter = constants.get_fiscal_quarter(q_start_ts)
+    cohort_start   = q_start_ts - pd.DateOffset(months=1)
+    far_future     = pd.Timestamp("2099-12-31")
 
-    # Q3 Boundaries
-    q3_start_ts = q_start_ts - pd.DateOffset(months=3)          # 2026-03-01
+    print(f"📅 Active Reporting Quarter: {constants.get_fiscal_year(q_start_ts)} {active_quarter}")
+
+    PROGRAM_CAPACITY, OCCUPANCY_GOAL, PROGRAM_GOALS = load_fy27_kpi_goals(
+        drive_service, gc, active_quarter
+    )
+    PROGRAM_PROJECTIONS = load_graduate_projections(drive_service, gc)
 
     input_folder_id  = resolve_folder_id(drive_service, input_folder_name, "Input")
     output_folder_id = resolve_folder_id(drive_service, output_folder_name, "Output")
 
-    # =========================================================================
-    # 2. Download and Load Raw Data & Module Progress Data
-    # =========================================================================
     print(f"Downloading {input_file}...")
     fh, _, _ = download_drive_file(drive_service, input_file, input_folder_id)
     df_raw = load_raw(fh, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
@@ -163,16 +223,13 @@ def run_renew_processing(
     fh_mod, _, _ = download_drive_file(drive_service, module_file, input_folder_id)
     df_mod_raw = load_raw(fh_mod, header_row=RAW_DATA_HEADER_ROW, start_col=RAW_DATA_START_COL)
 
-    # Compute prioritized intern column across datasets
     for df_target in [df_raw, df_mod_raw]:
         df_target["_INTERN_RESOLVED"] = df_target.apply(get_intern_program_value, axis=1)
 
-    # Merge Module Progress data into Raw Data using Record Id_102
     dup_cols = [c for c in df_mod_raw.columns if c in df_raw.columns and c != COL_RECORD_ID]
     df_mod_clean = df_mod_raw.drop(columns=dup_cols)
     df_raw = df_raw.merge(df_mod_clean, on=COL_RECORD_ID, how="left")
 
-    # Ensure required checkin, spiritual mentor & indicator columns exist
     for col in ALL_MODULE_DATE_COLS + [COL_CHECKIN_DATE, COL_HOW_CHECKED, COL_ENGAGEMENT, COL_SM_START_DATE, "Acquired Spiritual Mentor_5136", "Acquired Sponsor_5137"]:
         if col not in df_raw.columns:
             df_raw[col] = np.nan
@@ -180,22 +237,31 @@ def run_renew_processing(
     df_base = df_raw.copy()
     df_base[COL_START_DATE] = pd.to_datetime(df_base[COL_START_DATE], errors="coerce")
     df_base[COL_EXIT_DATE]  = pd.to_datetime(df_base[COL_EXIT_DATE],  errors="coerce")
-    df_base[COL_PROGRAM]   = df_base[COL_PROGRAM].replace("House of Grace", "GV Renew")
+    df_base[COL_PROGRAM]    = df_base[COL_PROGRAM].replace({
+        "House of Grace": "GV Renew",
+        "San Jose Women Renew": "GV Renew",
+    })
     df_base = df_base[df_base[COL_PROGRAM].isin(RENEW_PROGRAMS)].reset_index(drop=True)
 
-    # =========================================================================
-    # 3. Helper Functions
-    # =========================================================================
     def assign_city_custom(program_name):
         prog_str = str(program_name).strip().lower()
         if any(x in prog_str for x in ["san jose women", "sj wp", "house of grace", "gv renew", "heritage home", "san jose youth"]):
             return "San Jose Women"
-        return constants.assign_city(program_name)
+        if "san jose men" in prog_str or "sj men" in prog_str:
+            return "San Jose Men"
+        if "chester" in prog_str:
+            return "Chester"
+        if "oakland" in prog_str:
+            return "Oakland"
+        if "portland" in prog_str:
+            return "Portland"
+        return "Other"
 
     def categorize_exit_reason(val):
-        if pd.isna(val) or str(val).strip() == "": return None
+        if pd.isna(val) or str(val).strip() == "":
+            return None
         v = str(val).lower().strip()
-        if any(x in v for x in ['graduation', 'completer', 'completion', 'internship ended']): return "Graduation"
+        if is_graduation_reason(v): return "Graduation"
         if any(x in v for x in ['relapse', 'drug', 'detox', 'fentanyl', 'paraph', 'blackout', 'deviating']): return "Relapse"
         if any(x in v for x in ['discipline', 'conduct', 'behavior', 'threat', 'violence', 'awol', '30 day review', 'incident']): return "Discipline"
         if any(x in v for x in ['family', 'child', 'wife', 'daughter', 'son', 'mother', 'reunif']): return "Family"
@@ -217,7 +283,7 @@ def run_renew_processing(
         start = pd.to_datetime(df[COL_START_DATE], errors="coerce")
         exit_dt = pd.to_datetime(df[COL_EXIT_DATE], errors="coerce")
         end = exit_dt.fillna(today)
-        
+
         days = (end - start).dt.days
         return days.where(start.notna(), np.nan)
 
@@ -259,7 +325,7 @@ def run_renew_processing(
 
         city = row.get("City")
         mod_cols = CITY_MODULE_MAP.get(city, [])
-        
+
         mod2_col = None
         for num, col_name in mod_cols:
             if num == 2:
@@ -297,9 +363,14 @@ def run_renew_processing(
 
         return latest_num if latest_num is not None else np.nan
 
-    # =========================================================================
-    # Fiscal Date Helpers for Averages
-    # =========================================================================
+    def calc_theoretical_max(row):
+        cap_num = parse_numeric_cell(row.get("Capacity"), default=np.nan)
+        if pd.isna(cap_num):
+            return np.nan
+        prog = str(row.get(COL_PROGRAM, "")).strip()
+        multiplier = 2.0 if prog in RENEW_SIX_MONTH_PROGRAMS else 1.33
+        return int(round(float(cap_num) * multiplier))
+
     def get_fy(date):
         return date.year + 1 if date.month >= 9 else date.year
 
@@ -360,7 +431,7 @@ def run_renew_processing(
 
         min_date = df["_Date"].min()
         max_date = pd.Timestamp.now()
-        
+
         timeline = pd.date_range(start=min_date, end=max_date, freq='D')
         df_timeline = pd.DataFrame({"_Date": timeline})
         df_timeline["_period"] = df_timeline["_Date"].apply(period_fn)
@@ -393,7 +464,7 @@ def run_renew_processing(
             for prog in RENEW_PROGRAMS:
                 cat_val = RENEW_PROGRAM_CATEGORY.get(prog, "Renew")
                 city_val = assign_city_custom(prog)
-                
+
                 total_count = float(counts.get((fy_period, prog), 0))
 
                 rows.append({
@@ -412,7 +483,7 @@ def run_renew_processing(
     def write_averages_tab(out_ss, tab_name, df_avg, period_col_name):
         if df_avg.empty:
             return
-        
+
         df_out = df_avg.rename(columns={
             "Period": period_col_name,
             "FY Period": f"FY {period_col_name}"
@@ -424,18 +495,14 @@ def run_renew_processing(
         write_tab(out_ss, tab_name, df_out)
         print(f"✅ {tab_name} written")
 
-    # =========================================================================
-    # 4. Tab Processors
-    # =========================================================================
     def process_graduates(df_base):
         df = df_base.copy()
 
-        df["_is_grad"] = df[COL_EXIT_REASON].isin(GRAD_REASONS).astype(int)
+        df["_is_grad"] = df[COL_EXIT_REASON].apply(is_graduation_reason).astype(int)
         df = (df.sort_values(["_is_grad", COL_EXIT_DATE], ascending=[False, False])
-                .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM, COL_START_DATE], keep="first")
-                .drop(columns=["_is_grad"]))
-        
-        df = df[df[COL_EXIT_DATE].notna() & df[COL_EXIT_REASON].isin(GRAD_REASONS)].copy()
+                .drop_duplicates(subset=[COL_RECORD_ID, COL_PROGRAM, COL_START_DATE], keep="first"))
+
+        df = df[df[COL_EXIT_DATE].notna() & (df["_is_grad"] == 1)].drop(columns=["_is_grad"]).copy()
 
         df["City"]            = df[COL_PROGRAM].apply(assign_city_custom)
         df["Year"]            = df[COL_EXIT_DATE].apply(constants.get_fiscal_year)
@@ -444,24 +511,20 @@ def run_renew_processing(
         df["Month"]           = pd.to_datetime(df[COL_EXIT_DATE], errors="coerce").dt.strftime("%Y-%m-01").fillna("")
         df["Days in Program"] = calc_days_in_program(df)
 
-        df["Current FY Goal"]        = df[COL_PROGRAM].map(constants.PROGRAM_GOALS)
-        df["Next FY Goal"]           = df[COL_PROGRAM].map(constants.NEXT_FY_GRAD_GOALS)
-        df["Current FY Projection"]  = df[COL_PROGRAM].map(constants.PROGRAM_PROJECTIONS)
-        df["Capacity"]               = df[COL_PROGRAM].map(constants.PROGRAM_CAPACITY)
-        df["Theoretical Maximum"]    = df[COL_PROGRAM].map(constants.PROGRAM_THEORETICAL_MAX)
-
-        df["FY27 Capacity"]          = df[COL_PROGRAM].map(FY27_CAPACITY_MAP)
-        df["FY27 Occupancy Goal"]    = df[COL_PROGRAM].map(FY27_OCC_GOAL_MAP)
+        df["Current FY Q Goal"]       = df[COL_PROGRAM].map(PROGRAM_GOALS)
+        df["Current FY Projection"] = df[COL_PROGRAM].map(PROGRAM_PROJECTIONS)
+        df["Capacity"]              = df[COL_PROGRAM].map(PROGRAM_CAPACITY)
+        df["Theoretical Maximum"]   = df.apply(calc_theoretical_max, axis=1)
 
         for k, (w_start, w_end) in constants.ACTUALS_WINDOWS.items():
             df[k] = (df[COL_EXIT_DATE].notna() & (df[COL_EXIT_DATE] >= pd.Timestamp(w_start)) & (df[COL_EXIT_DATE] <= pd.Timestamp(w_end))).astype(int)
 
-        cols = [COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, "Days in Program", COL_EXIT_REASON,
-                "City", "Year", "Quarter", "Year Q", "Month",
-                "Current FY Goal", "Next FY Goal", "Current FY Projection", "Capacity", "Theoretical Maximum",
-                "FY27 Capacity", "FY27 Occupancy Goal"
-                ] + list(constants.ACTUALS_WINDOWS.keys())
-        
+        cols = [
+            COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, "Days in Program", COL_EXIT_REASON,
+            "City", "Year", "Quarter", "Year Q", "Month",
+            "Current FY Q Goal", "Current FY Projection", "Capacity", "Theoretical Maximum"
+        ] + list(constants.ACTUALS_WINDOWS.keys())
+
         df = df[[c for c in cols if c in df.columns]].copy()
 
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
@@ -470,8 +533,10 @@ def run_renew_processing(
 
     def was_active_on(start_date, exit_date, ref_date):
         ref = pd.Timestamp(ref_date)
-        if pd.isnull(start_date) or start_date > ref: return 0
-        if pd.isnull(exit_date) or exit_date > ref: return 1
+        if pd.isnull(start_date) or start_date > ref:
+            return 0
+        if pd.isnull(exit_date) or exit_date > ref:
+            return 1
         return 0
 
     def process_occupancy(df_base):
@@ -486,33 +551,34 @@ def run_renew_processing(
         df[constants.OCC_CURRENT_LABEL] = df.apply(lambda r: was_active_on(r[COL_START_DATE], r[COL_EXIT_DATE], constants.OCC_CURRENT_DATE), axis=1)
 
         def count_kids_only(row):
-            if row["City"] != "San Jose Women": return 0
+            if row["City"] != "San Jose Women":
+                return 0
             val = row.get(COL_CHILD)
-            if pd.isna(val) or str(val).strip() == "": return 0
-            import re as _re
-            parts = _re.split(r'[,&]|\band\b', str(val).strip(), flags=_re.IGNORECASE)
+            if pd.isna(val) or str(val).strip() == "":
+                return 0
+            parts = re.split(r'[,&]|\band\b', str(val).strip(), flags=re.IGNORECASE)
             return len([p for p in parts if p.strip()])
-            
+
         df["Number of Children"] = df.apply(count_kids_only, axis=1)
-        df["Capacity"]           = df[COL_PROGRAM].map(constants.PROGRAM_CAPACITY)
-        df["Goal"]               = df[COL_PROGRAM].map(constants.OCCUPANCY_GOAL)
-        df["Next FY Goal"]       = df[COL_PROGRAM].map(constants.NEXT_FY_OCC_GOALS)
-        df["Prior FY Occupancy"] = df[COL_PROGRAM].map(constants.OCCUPANCY_PRIOR_FY)
+
+        df["Capacity"]           = df[COL_PROGRAM].map(PROGRAM_CAPACITY)
+        df["Goal"]               = df[COL_PROGRAM].map(OCCUPANCY_GOAL)
+        df["Prior FY Occupancy"] = np.nan
 
         df["Days in Program"]    = calc_days_in_program(df)
         df["Days(Time Window)"]  = df["Days in Program"].apply(calc_days_time_window)
         df["Current Module"]     = df.apply(calculate_current_module, axis=1)
 
-        df["Spiritual Mentor"]          = df.apply(calc_spiritual_mentor, axis=1)
-        df["SM on or before Mod2?"]     = df.apply(calc_sm_on_or_before_mod2, axis=1)
-        df["AA Sponsor"]                = df.apply(calc_aa_sponsor, axis=1)
+        df["Spiritual Mentor"]      = df.apply(calc_spiritual_mentor, axis=1)
+        df["SM on or before Mod2?"] = df.apply(calc_sm_on_or_before_mod2, axis=1)
+        df["AA Sponsor"]            = df.apply(calc_aa_sponsor, axis=1)
 
         target_cols = [
             COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, "Days in Program",
             "Days(Time Window)", "City", constants.OCC_PRIOR_LABEL, constants.OCC_CURRENT_LABEL,
             COL_CHILD, "Number of Children", COL_SJ_CASE_MGR, "Current Module",
             COL_SM_START_DATE, "Spiritual Mentor", "SM on or before Mod2?", "AA Sponsor", COL_ENGAGEMENT
-        ] + ALL_MODULE_DATE_COLS + ["Capacity", "Goal", "Next FY Goal", "Prior FY Occupancy"]
+        ] + ALL_MODULE_DATE_COLS + ["Capacity", "Goal", "Prior FY Occupancy"]
 
         df = df[[c for c in target_cols if c in df.columns]].copy()
 
@@ -542,18 +608,18 @@ def run_renew_processing(
         exit_date_filled = df[COL_EXIT_DATE].fillna(far_future)
 
         df["Exit Reason Category"] = df[COL_EXIT_REASON].apply(categorize_exit_reason)
-        df["Days in Program"]     = calc_days_in_program(df)
-        is_graduated = df[COL_EXIT_DATE].notna() & df[COL_EXIT_REASON].isin(GRAD_REASONS)
+        df["Days in Program"]      = calc_days_in_program(df)
+        is_graduated = df[COL_EXIT_DATE].notna() & df[COL_EXIT_REASON].apply(is_graduation_reason)
 
         in_up_to_date_cohort = (
-            (df[COL_START_DATE] >= cohort_start) & 
+            (df[COL_START_DATE] >= cohort_start) &
             (df[COL_START_DATE] <= today_ts)
         )
 
         reached_31_up_to_today = (
             in_up_to_date_cohort &
-            (day_31_date >= q_start_ts) & 
-            (day_31_date <= today_ts) & 
+            (day_31_date >= q_start_ts) &
+            (day_31_date <= today_ts) &
             (exit_date_filled >= day_31_date)
         )
         df["Achieved 31 days"] = reached_31_up_to_today.astype(int)
@@ -568,17 +634,18 @@ def run_renew_processing(
         df["Still in Program(31days)/Graduated"] = still_or_grad_31.astype(int)
 
         q3_cohort_start = q_start_ts - pd.DateOffset(months=4)
+        q3_start_ts     = q_start_ts - pd.DateOffset(months=3)
         q3_end_ts       = q_start_ts - pd.Timedelta(days=1)
 
         in_q3_cohort = (
-            (df[COL_START_DATE] >= q3_cohort_start) & 
+            (df[COL_START_DATE] >= q3_cohort_start) &
             (df[COL_START_DATE] <= q3_end_ts)
         )
 
         reached_31_q3 = (
             in_q3_cohort &
-            (day_31_date >= q3_start_ts) & 
-            (day_31_date <= q3_end_ts) & 
+            (day_31_date >= q3_start_ts) &
+            (day_31_date <= q3_end_ts) &
             (exit_date_filled >= day_31_date)
         )
         df["Achieved 31 days (Last Q)"] = reached_31_q3.astype(int)
@@ -591,8 +658,8 @@ def run_renew_processing(
         )
         df["Still in Program(31days)/Graduated(Last Q)"] = still_or_grad_31_q3.astype(int)
 
-        in_q4_cohort = (
-            (df[COL_START_DATE] >= cohort_start) & 
+        in_current_q_cohort = (
+            (df[COL_START_DATE] >= cohort_start) &
             (df[COL_START_DATE] <= q_end_ts)
         )
 
@@ -600,8 +667,8 @@ def run_renew_processing(
         is_active_at_q_end = exit_date_filled > q_end_ts
 
         df["City"]     = df[COL_PROGRAM].apply(assign_city_custom)
-        df["Capacity"] = df[COL_PROGRAM].map(constants.PROGRAM_CAPACITY)
-        
+        df["Capacity"] = df[COL_PROGRAM].map(PROGRAM_CAPACITY)
+
         df["Year"]    = df[COL_START_DATE].apply(constants.get_fiscal_year)
         df["Quarter"] = df[COL_START_DATE].apply(constants.get_fiscal_quarter)
         df["Year Q"]  = (df["Year"].fillna("") + " " + df["Quarter"].fillna("")).str.strip()
@@ -615,14 +682,16 @@ def run_renew_processing(
             (gap < 30)
         ).astype(int)
         df["Graduated"]              = is_graduated.astype(int)
-        df["Still in Program"]       = (in_q4_cohort & is_active_at_q_end).astype(int)
+        df["Still in Program"]       = (in_current_q_cohort & is_active_at_q_end).astype(int)
 
-        cols = [COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, "Days in Program", COL_EXIT_REASON,
-                "Exit Reason Category", "City", "Year", "Quarter", "Year Q", "Capacity",
-                "Entered Since Prior FY", "Exit After 30 Days", "Exit Before 30 Days",
-                "Graduated", "Still in Program", 
-                "Still in Program(31days)/Graduated", "Achieved 31 days",
-                "Still in Program(31days)/Graduated(Last Q)", "Achieved 31 days (Last Q)"]
+        cols = [
+            COL_RECORD_ID, COL_NAME, COL_PROGRAM, COL_START_DATE, COL_EXIT_DATE, "Days in Program", COL_EXIT_REASON,
+            "Exit Reason Category", "City", "Year", "Quarter", "Year Q", "Capacity",
+            "Entered Since Prior FY", "Exit After 30 Days", "Exit Before 30 Days",
+            "Graduated", "Still in Program",
+            "Still in Program(31days)/Graduated", "Achieved 31 days",
+            "Still in Program(31days)/Graduated(Last Q)", "Achieved 31 days (Last Q)"
+        ]
         df = df[[c for c in cols if c in df.columns]].copy()
 
         df[COL_START_DATE] = fmt_date(df, COL_START_DATE)
@@ -634,14 +703,11 @@ def run_renew_processing(
         if COL_ENGAGEMENT not in df.columns:
             return pd.DataFrame()
 
-        # Filter strictly for 'Enrolled' status across all programs
         is_enrolled = df[COL_ENGAGEMENT].fillna("").astype(str).str.strip().str.lower() == "enrolled"
         df_ecm = df[is_enrolled].copy()
 
-        # Convert Start Date to datetime for sorting
         df_ecm["_start_dt"] = pd.to_datetime(df_ecm[COL_START_DATE], errors="coerce")
 
-        # Sort by Start Date descending (newest first) and keep the most recent record per Record ID
         df_ecm = (
             df_ecm.sort_values(by="_start_dt", ascending=False)
             .drop_duplicates(subset=[COL_RECORD_ID], keep="first")
@@ -649,18 +715,16 @@ def run_renew_processing(
             .reset_index(drop=True)
         )
 
-        # Assign City column based on Program Enrolling or Prioritized Intern Program Column
         def assign_ecm_city(row):
             prog = str(row.get(COL_PROGRAM, "")).strip()
             intern_prog = str(row.get("_INTERN_RESOLVED", "")).strip()
-            
+
             prog_lower = prog.lower()
             intern_lower = intern_prog.lower()
 
-            # Check if enrolled program matches intern titles or if intern/post-grad field is populated
             if prog_lower in INTERN_PROGRAM_NAMES or "intern" in prog_lower or (intern_prog and intern_lower != "nan"):
                 target_str = intern_lower if (intern_prog and intern_lower != "nan") else prog_lower
-                
+
                 if "chester" in target_str:
                     return "Chester"
                 elif "oakland" in target_str:
@@ -672,7 +736,6 @@ def run_renew_processing(
                 elif any(x in target_str for x in ["san jose women", "sj women", "wp", "house of grace", "gv", "heritage home", "san jose youth"]):
                     return "San Jose Women"
 
-            # Check for SJ WP Transition Phase, Heritage Home, or Youth Collective
             if any(x in prog_lower for x in ["sj wp", "wp transition", "heritage home", "san jose youth"]):
                 return "San Jose Women"
 
@@ -682,9 +745,6 @@ def run_renew_processing(
 
         return df_ecm
 
-    # =========================================================================
-    # 5. Execute Tab Processing
-    # =========================================================================
     print("Processing Graduates...")
     df_grad = process_graduates(df_base)
 
@@ -697,9 +757,6 @@ def run_renew_processing(
     print("Processing ECM Clients...")
     df_ecm = process_ecm_clients(df_mod_raw)
 
-    # =========================================================================
-    # 6. Google Sheets Export
-    # =========================================================================
     processed_file = find_file_id(drive_service, output_file, output_folder_id, "application/vnd.google-apps.spreadsheet")
     if processed_file:
         spreadsheet = gc.open_by_key(processed_file['id'])
@@ -720,20 +777,26 @@ def run_renew_processing(
     write_tab(spreadsheet, "Retention",       df_ret)
     write_tab(spreadsheet, "ECM Clients",     df_ecm)
 
-    # =========================================================================
-    # 7. Compute & Export Graduates Average Tabs
-    # =========================================================================
     print("\nComputing Renew Graduates Averages...")
-    write_averages_tab(spreadsheet, "Graduates Weekly Avg", 
-                       compute_kpi_averages(df_grad, COL_EXIT_DATE, get_week_label, get_fy_week_label, is_weekly=True, min_fy="FY26"), "Week")
-    write_averages_tab(spreadsheet, "Graduates Monthly Avg", 
-                       compute_kpi_averages(df_grad, COL_EXIT_DATE, get_month, get_fy_month), "Month")
-    write_averages_tab(spreadsheet, "Graduates Quarterly Avg", 
-                       compute_kpi_averages(df_grad, COL_EXIT_DATE, get_quarter, get_fy_quarter), "Quarter")
+    write_averages_tab(
+        spreadsheet, "Graduates Weekly Avg",
+        compute_kpi_averages(df_grad, COL_EXIT_DATE, get_week_label, get_fy_week_label, is_weekly=True, min_fy="FY26"),
+        "Week"
+    )
+    write_averages_tab(
+        spreadsheet, "Graduates Monthly Avg",
+        compute_kpi_averages(df_grad, COL_EXIT_DATE, get_month, get_fy_month),
+        "Month"
+    )
+    write_averages_tab(
+        spreadsheet, "Graduates Quarterly Avg",
+        compute_kpi_averages(df_grad, COL_EXIT_DATE, get_quarter, get_fy_quarter),
+        "Quarter"
+    )
 
     try:
         spreadsheet.del_worksheet(spreadsheet.worksheet("Sheet1"))
-    except:
+    except Exception:
         pass
 
     print(f"\n🎉 Processing complete!: {spreadsheet.url}")

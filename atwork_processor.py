@@ -122,6 +122,8 @@ def run_atwork_processing(
         "Traffic Control Date_6786",
     ]
 
+    ACCOMPLISHMENT_IDS = ("_7293", "_7295", "_7297", "_7299")
+
     EXTRA_WINDOW_COLS = [
         "High School Equivalency (HSE) Date_5110",
         "Bank Account Obtained Date_6640",
@@ -229,7 +231,19 @@ def run_atwork_processing(
             win_end=win_end
         )
 
-        date_cols_all     = [c for c in df.columns if "Date" in c]
+        # Detect Accomplishment 1-4 columns by field ID suffix (_7293, _7295, _7297, _7299)
+        existing_acc_cols = [
+            c for c in df.columns
+            if any(str(c).strip().endswith(fid) for fid in ACCOMPLISHMENT_IDS)
+        ]
+
+        # Normalize Accomplishment columns so blanks/invalid tokens become true nulls (np.nan)
+        invalid_tokens = {"", "nan", "none", "nat", "<na>"}
+        for col in existing_acc_cols:
+            s_clean = df[col].astype(str).str.strip()
+            df[col] = df[col].where(df[col].notna() & (~s_clean.str.lower().isin(invalid_tokens)), np.nan)
+
+        date_cols_all     = [c for c in df.columns if "Date" in c and c not in existing_acc_cols]
         non_date_cols     = [c for c in df.columns if c not in date_cols_all and c != COL_ID]
         existing_ic_cols  = [c for c in IC_DATE_COLS if c in df.columns]
         existing_ext_cols = [c for c in EXTRA_WINDOW_COLS if c in df.columns]
@@ -238,7 +252,7 @@ def run_atwork_processing(
         for col in date_cols_all:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
-        # Merge client rows — max date takes latest populated job acquired date across records
+        # Merge client rows — takes first non-null value for non-date & accomplishment cols, max for date cols
         agg_dict = {col: "first" for col in non_date_cols}
         agg_dict.update({col: "max" for col in date_cols_all})
         df = df.sort_values(COL_DATE, ascending=False).groupby(COL_ID, sort=False).agg(agg_dict).reset_index()
@@ -275,7 +289,11 @@ def run_atwork_processing(
                     other=pd.NaT
                 )
 
-        df["Total IC"]   = df[[c for c in existing_ic_cols if c in df.columns]].notna().sum(axis=1)
+        # Total IC = in-window IC date columns + count of filled Accomplishment 1-4 columns (no time window)
+        ic_date_count = df[existing_ic_cols].notna().sum(axis=1) if existing_ic_cols else 0
+        acc_count     = df[existing_acc_cols].notna().sum(axis=1) if existing_acc_cols else 0
+
+        df["Total IC"]   = ic_date_count + acc_count
         df["At least 1"] = (df["Total IC"] >= 1).astype(int)
 
         # City — vectorized

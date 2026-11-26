@@ -1,6 +1,6 @@
 # ============================================================
-#  constants.py — Zero-Redundancy KPI Constants Module
-#  Call sync_constants() once at startup to populate all values.
+#  constants.py — Fiscal Year, Quarter & Time Window Module
+#  Reads FY & Q from 'FY Q Update' in CityTeam Impact Data/CityTeam KPIs.
 # ============================================================
 
 import calendar
@@ -16,7 +16,6 @@ from drive_utils import find_file_id, resolve_folder_id
 MONTHLY_HOURS = 173.33
 GRAD_REASONS = ["Graduation", "Completer", "Completion of Program"]
 
-# Core Program Sets (Single source of truth)
 RENEW_PROGRAMS = {
     "Chester Renew", "GV Renew", "Oakland Renew", "Portland Renew", "San Jose Men Renew"
 }
@@ -32,7 +31,6 @@ VALID_PROGRAMS_NUM_DEN = {"San Jose Men Renew", "GV Renew"}
 VALID_PROGRAMS_IMPACT = VALID_PROGRAMS_ALL
 VALID_INTERN_PROGRAMS_IMPACT = VALID_PROGRAMS_ALL - {"Program Graduate Intern"}
 
-# Generate Forward Map variations programmatically to avoid key repetition
 _FORWARD_BASE = {
     "GV Men's Forward": "San Jose Men Renew",
     "GV Women's Forward": "GV Renew",
@@ -52,8 +50,8 @@ FORWARD_MAP = {**_FORWARD_BASE, **{k.lower(): v for k, v in _FORWARD_BASE.items(
 #  DYNAMIC GLOBALS INITIALIZATION
 # ============================================================
 
-fy_num = 2026
-FY_LABEL, Q_LABEL = "FY26", "Q1"
+fy_num = 2027
+FY_LABEL, Q_LABEL = "FY27", "Q1"
 PRIOR_FY_LABEL = PP_FY_LABEL = PPP_FY_LABEL = ""
 
 CURRENT_Q_START = CURRENT_Q_END = CURRENT_FY_QX_START = CURRENT_FY_QX_END = None
@@ -65,54 +63,69 @@ OCC_CURRENT_DATE = OCC_PRIOR_DATE = None
 FY_QUARTERS = []
 
 OCC_CURRENT_LABEL, OCC_PRIOR_LABEL = "Current Period Actuals", "Prior Period Actuals"
-
-ACTUALS_WINDOWS, PROGRAM_GOALS, PROGRAM_PROJECTIONS = {}, {}, {}
-PROGRAM_CAPACITY, PROGRAM_THEORETICAL_MAX = {}, {}
-OCCUPANCY_CAPACITY, OCCUPANCY_GOAL, OCCUPANCY_PRIOR_FY = {}, {}, {}
-LW_CRITERIA, TP_CAPACITY, TP_GOAL, TP_PRIOR_FY = {}, {}, {}, {}
-NEXT_FY_GRAD_GOALS, NEXT_FY_OCC_GOALS = {}, {}                                   # Renew
-NEXT_FY_GRAD_GOALS_TP, NEXT_FY_OCC_GOALS_TP, NEXT_FY_HOUSED_GOALS_TP = {}, {}, {}  # Turning Point
+ACTUALS_WINDOWS = {}
 
 
 # ============================================================
-#  LOAD CONSTANTS FROM GOOGLE SHEET
+#  LOAD FY & Q FROM 'FY Q Update' GOOGLE SHEET
 # ============================================================
+
+def _resolve_kpis_folder_id(drive_service):
+    """Traverses CityTeam Impact Data -> CityTeam KPIs in Shared Drives."""
+    parent_id = None
+    for folder_name in ["CityTeam Impact Data", "CityTeam KPIs"]:
+        q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        if parent_id:
+            q += f" and '{parent_id}' in parents"
+        res = drive_service.files().list(
+            q=q,
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
+        files = res.get("files", [])
+        if not files:
+            return resolve_folder_id(drive_service, "CityTeam KPIs", "Constants")
+        parent_id = files[0]["id"]
+    return parent_id
+
 
 def sync_constants():
     drive_service, _, creds = get_services()
-    folder_path = "CityTeam Impact Data/CityTeam KPIs"
-    sheet_name = "Constants Update"
+    folder_id = _resolve_kpis_folder_id(drive_service)
+    sheet_name = "FY Q Update"
 
-    folder_id = resolve_folder_id(drive_service, folder_path.split("/")[-1], "Constants")
     target_file = find_file_id(drive_service, sheet_name, folder_id)
     if not target_file:
-        raise FileNotFoundError(f"❌ '{sheet_name}' not found in {folder_path}")
+        raise FileNotFoundError(f"❌ '{sheet_name}' not found in CityTeam Impact Data/CityTeam KPIs")
 
     sheets_service = build("sheets", "v4", credentials=creds)
     sheet_data = sheets_service.spreadsheets().values().get(
-        spreadsheetId=target_file['id'], range="A1:O42"
+        spreadsheetId=target_file["id"], range="A1:E10"
     ).execute().get("values", [])
 
-    def get_val(r_idx, c_idx):
-        try:
-            val = sheet_data[r_idx][c_idx]
-            return float(str(val).replace("$", "").replace(",", "").strip())
-        except (IndexError, ValueError, TypeError):
-            return None
-
-    # Report Period Setup
+    # Read Fiscal Year (B3) and Quarter (C3)
     row3 = sheet_data[2] if len(sheet_data) > 2 else []
-    raw_fy, raw_q = (row3[1] if len(row3) > 1 else None), (row3[2] if len(row3) > 2 else None)
-    if raw_fy is None:
-        raise ValueError("❌ Fiscal Year missing at B3.")
+    raw_fy = row3[1] if len(row3) > 1 else None
+    raw_q  = row3[2] if len(row3) > 2 else None
 
-    fy = int(str(raw_fy).strip())
+    if raw_fy is None or str(raw_fy).strip() == "":
+        raise ValueError("❌ Fiscal Year missing at B3 in 'FY Q Update'.")
+    if raw_q is None or str(raw_q).strip() == "":
+        raise ValueError("❌ Quarter missing at C3 in 'FY Q Update'.")
+
+    fy = int(str(raw_fy).strip().upper().replace("FY", ""))
     fy = fy + 2000 if fy < 100 else fy
     fy_lbl = f"FY{str(fy)[-2:]}"
-    q_lbl = f"Q{str(raw_q).strip()}" if str(raw_q).strip().isdigit() else str(raw_q).strip()
 
-    # Dates Calculation
+    q_clean = str(raw_q).strip().upper()
+    q_lbl = f"Q{q_clean}" if q_clean.isdigit() else q_clean
+
+    # Calculate Quarter & Fiscal Year Date Boundaries
     q_months = {"Q1": (9, 11), "Q2": (12, 2), "Q3": (3, 5), "Q4": (6, 8)}
+    if q_lbl not in q_months:
+        raise ValueError(f"❌ Invalid Quarter '{q_lbl}' in 'FY Q Update'. Expected Q1-Q4.")
+
     q_start_m, q_end_m = q_months[q_lbl]
     fy_start_yr = fy - 1
     q_start_yr = fy_start_yr if q_lbl in ["Q1", "Q2"] else fy
@@ -126,76 +139,17 @@ def sync_constants():
     prior_fy_num = fy - 1
     prior_fy_qx_end = cur_q_end - pd.DateOffset(years=1)
 
-    # Matrix Loading for Renew Programs (Cols B, C, D, E, G, H, I)
-    sorted_renew = sorted(RENEW_PROGRAMS)
-    renew_col_map = [
-        (PROGRAM_GOALS, 1), (PROGRAM_PROJECTIONS, 2), (PROGRAM_CAPACITY, 3),
-        (PROGRAM_THEORETICAL_MAX, 4), (OCCUPANCY_CAPACITY, 6),
-        (OCCUPANCY_GOAL, 7), (OCCUPANCY_PRIOR_FY, 8)
-    ]
-    for idx, prog in enumerate(sorted_renew):
-        row = 9 + (idx * 4)
-        for target_dict, col in renew_col_map:
-            target_dict[prog] = get_val(row, col)
-        LW_CRITERIA[prog] = get_val(8 + (idx * 2), 10)  # Col K
-
-    # Load Next FY Goals from FY27 Goals tab
-    try:
-        fy27_data = sheets_service.spreadsheets().values().get(
-            spreadsheetId=target_file['id'], range="'FY27 Goals'!A1:K50"
-        ).execute().get("values", [])
-
-        def get_fy27(r_idx, c_idx):
-            try:
-                val = fy27_data[r_idx][c_idx]
-                if pd.isna(val) or str(val).strip() == "": return 0
-                return float(str(val).replace("$", "").replace(",", "").strip())
-            except (IndexError, ValueError, TypeError):
-                return 0
-
-        # Renew: Col B (Graduates), Col D (Occupancy)
-        NEXT_FY_GRAD_GOALS.clear()
-        NEXT_FY_OCC_GOALS.clear()
-        next_fy_renew_rows = [6, 10, 14, 18, 22]  # rows 7,11,15,19,23 (0-indexed)
-        for prog, row in zip(sorted_renew, next_fy_renew_rows):
-            NEXT_FY_GRAD_GOALS[prog] = get_fy27(row, 1)  # Col B
-            NEXT_FY_OCC_GOALS[prog]  = get_fy27(row, 3)  # Col D
-
-        # Turning Point: Col G (Graduates), Col I (Occupancy), Col K (Housed Goal)
-        NEXT_FY_GRAD_GOALS_TP.clear()
-        NEXT_FY_OCC_GOALS_TP.clear()
-        NEXT_FY_HOUSED_GOALS_TP.clear()
-        tp_next_fy_rows = [6, 10, 14, 18, 22, 26, 30, 34, 38, 42]  # rows 7,11,15,19,23,27,31,35,39,43
-        tp_next_fy_programs = [
-            "Chester Men Turning Point", "Chester Women Turning Point",
-            "Oakland Men Turning Point", "Oakland Women Turning Point",
-            "Portland Community of Hope", "Portland Men Turning Point",
-            "GV Turning Point", "Heritage Home",
-            "San Jose Men Turning Point", "San Jose Youth Collective"
-        ]
-        for prog, row in zip(tp_next_fy_programs, tp_next_fy_rows):
-            NEXT_FY_GRAD_GOALS_TP[prog]   = get_fy27(row, 6)   # Col G
-            NEXT_FY_OCC_GOALS_TP[prog]    = get_fy27(row, 8)   # Col I
-            NEXT_FY_HOUSED_GOALS_TP[prog] = get_fy27(row, 10)  # Col K
-        print("✅ Next FY Goals loaded.")
-    except Exception as e:
-        print(f"⚠️  Could not load FY27 Goals tab: {e}")
-
-    # Matrix Loading for Turning Point Programs (Cols M, N, O)
-    tp_col_map = [(TP_CAPACITY, 12), (TP_GOAL, 13), (TP_PRIOR_FY, 14)]
-    for idx, prog in enumerate(TP_PROGRAMS):
-        row = 9 + (idx * 4)
-        for target_dict, col in tp_col_map:
-            target_dict[prog] = get_val(row, col)
-
-    # Global State Update
     globals().update({
-        "fy_num": fy, "FY_LABEL": fy_lbl, "Q_LABEL": q_lbl,
+        "fy_num": fy,
+        "FY_LABEL": fy_lbl,
+        "Q_LABEL": q_lbl,
         "PRIOR_FY_LABEL": f"FY{str(prior_fy_num)[-2:]}",
         "PP_FY_LABEL": f"FY{str(fy - 2)[-2:]}",
         "PPP_FY_LABEL": f"FY{str(fy - 3)[-2:]}",
-        "CURRENT_Q_START": cur_q_start, "CURRENT_Q_END": cur_q_end,
-        "CURRENT_FY_QX_START": fy_start, "CURRENT_FY_QX_END": cur_q_end,
+        "CURRENT_Q_START": cur_q_start,
+        "CURRENT_Q_END": cur_q_end,
+        "CURRENT_FY_QX_START": fy_start,
+        "CURRENT_FY_QX_END": cur_q_end,
         "PRIOR_FY_QX_START": pd.Timestamp(f"{prior_fy_num - 1}-09-01"),
         "PRIOR_FY_QX_END": prior_fy_qx_end,
         "PP_FY_START": pd.Timestamp(f"{fy - 3}-09-01"),
@@ -204,16 +158,12 @@ def sync_constants():
         "PPP_FY_START": pd.Timestamp(f"{fy - 4}-09-01"),
         "PPP_FY_END": pd.Timestamp(f"{fy - 3}-08-31"),
         "PPP_FY_QX_END": prior_fy_qx_end - pd.DateOffset(years=2),
-        "FY_START": fy_start, "FY_END": pd.Timestamp(f"{fy}-08-31"),
+        "FY_START": fy_start,
+        "FY_END": pd.Timestamp(f"{fy}-08-31"),
         "RETENTION_START_CUTOFF": pd.Timestamp(f"{fy - 2}-09-01"),
-        "OCC_CURRENT_DATE": cur_q_end, "OCC_PRIOR_DATE": prior_fy_qx_end,
-
+        "OCC_CURRENT_DATE": cur_q_end,
+        "OCC_PRIOR_DATE": prior_fy_qx_end,
         "FY_QUARTERS": generate_fy_quarters(fy),
-        "NEXT_FY_GRAD_GOALS": NEXT_FY_GRAD_GOALS,
-        "NEXT_FY_OCC_GOALS": NEXT_FY_OCC_GOALS,
-        "NEXT_FY_GRAD_GOALS_TP": NEXT_FY_GRAD_GOALS_TP,
-        "NEXT_FY_OCC_GOALS_TP": NEXT_FY_OCC_GOALS_TP,
-        "NEXT_FY_HOUSED_GOALS_TP": NEXT_FY_HOUSED_GOALS_TP,
     })
 
     ACTUALS_WINDOWS.clear()
@@ -227,7 +177,7 @@ def sync_constants():
         "3 Years Ago Actuals"       : (pd.Timestamp(f"{fy - 4}-09-01"), pd.Timestamp(f"{fy - 3}-08-31")),
     })
 
-    print(f"✅ All dynamic constants loaded for {FY_LABEL} {Q_LABEL}.")
+    print(f"✅ Loaded {FY_LABEL} {Q_LABEL} time windows from '{sheet_name}'.")
 
 
 # ============================================================
@@ -270,5 +220,3 @@ def assign_city(program):
     if any(k in p for k in ["San Jose", "GV", "Heritage", "House of Grace"]):
         return "San Jose Women"
     return "Unknown"
-
-print("✅ Static configuration loaded.")

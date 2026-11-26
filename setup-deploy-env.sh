@@ -1,16 +1,24 @@
 #!/bin/bash
 
 # 1. Define Paths and Constants
-# Get the absolute path of the directory containing this script
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
-export SA_KEY_PATH="$SCRIPT_DIR/ct-kpi-automation-d56fab25ab61.json"
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd )
+
 export PROJECT_ID="ct-kpi-automation"
 export REGION="us-central1"
-export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"
-export ACCOUNT_EMAIL=kpi@cityteam.org
 
+# Automatically detect active logged-in gcloud user if ACCOUNT_EMAIL is not set
+export ACCOUNT_EMAIL="${ACCOUNT_EMAIL:-$(gcloud config get-value account 2>/dev/null)}"
 
-# Toggle this to "true" to skip Cloud Scheduler updates by default
+# Only set Service Account credentials if explicitly requested via USE_SA=true
+if [ "$USE_SA" = "true" ] && [ -f "$SCRIPT_DIR/ct-kpi-automation-d56fab25ab61.json" ]; then
+    export SA_KEY_PATH="$SCRIPT_DIR/ct-kpi-automation-d56fab25ab61.json"
+    export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"
+else
+    # Unset so Google SDK tools default to the active user's credentials
+    unset GOOGLE_APPLICATION_CREDENTIALS
+    unset SA_KEY_PATH
+fi
+
 export SKIP_SCHEDULER="true"
 
 # 2. Configure gcloud CLI (Claude says not to do this)
