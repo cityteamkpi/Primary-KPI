@@ -16,17 +16,13 @@ import gspread
 import pandas as pd
 
 from auth_utils import get_services
-from drive_utils import find_file_id, resolve_folder_id, write_tab
+from drive_utils import find_file_id, resolve_folder_path, write_tab
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 # =============================================================================
 # Configuration & Constants
 # =============================================================================
-
-TARGET_SPREADSHEET_ID = "19nPVbQHGXWwd8ATYKyxY_LF307aHfZEVAUKJf9R2muw"
-DEFAULT_OUTPUT_FILE = "wp-attendance-processed"
-OUTPUT_TAB_NAME = "Dashboard_Data"
 
 # Tabs within the input spreadsheet to ignore
 IGNORE_TABS = [
@@ -441,18 +437,18 @@ def _get_spreadsheet_now(ss: gspread.Spreadsheet) -> datetime:
 # =============================================================================
 # Main Processing Entry Point
 # =============================================================================
+OUTPUT_TAB_NAME = "Dashboard_Data"
 
 def run_attendance_processing(
-    input_spreadsheet_id: str = TARGET_SPREADSHEET_ID,
-    output_file: str = DEFAULT_OUTPUT_FILE,
-    input_folder_name: Optional[str] = None,
-    output_folder_name: Optional[str] = None,
+    input_spreadsheet_id = "19nPVbQHGXWwd8ATYKyxY_LF307aHfZEVAUKJf9R2muw",
+    output_file = "wp-attendance-processed",
+    output_folder_path = ["CityTeam Impact Data", "Program Ops", "Program Ops Processed Data"],
 ):
     # =========================================================================
     # 1. Initialize Services & Resolve Output Folder
     # =========================================================================
     drive_service, gc, _ = get_services()
-    output_folder_id = resolve_folder_id(drive_service, output_folder_name, "Output")
+    output_folder_id = resolve_folder_path(drive_service, output_folder_path)
 
     # =========================================================================
     # 2. Open Input Spreadsheet & Collect Matching Monthly Tabs
@@ -469,17 +465,14 @@ def run_attendance_processing(
         sheet_name = sheet.title.strip()
 
         if sheet_name in IGNORE_TABS:
-            print(f'[-] Skipping ignored tab: "{sheet_name}"')
             continue
 
         month_match = is_current_or_previous_month_tab(sheet, now)
         if not month_match.get("is_match"):
-            print(f'[-] Skipping tab: "{sheet_name}" (not current or previous month)')
             continue
 
         data = sheet.get_all_values()
         if len(data) < 5:
-            print(f'[-] Skipping tab "{sheet_name}" (fewer than 5 rows)')
             continue
 
         sheet_year = month_match.get("matched_year") or current_year
@@ -566,7 +559,4 @@ def run_attendance_processing(
 
 if __name__ == "__main__":
     print("🚀 Starting Attendance Processing")
-    run_attendance_processing(
-        input_folder_name="Apricot Report Incoming",
-        output_folder_name="KPI Processed Data",
-    )
+    run_attendance_processing()
